@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 ash = { version = "0.38.0", features = ["linked"] }
+ash-window = "0.13.0"
+raw-window-handle = "0.6.2"
 
 [dev-dependencies]
 winit = "0.30.11"
