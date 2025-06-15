@@ -1,8 +1,10 @@
+use ash::ext::debug_utils;
+use ash::prelude::VkResult;
+use ash::vk::{PhysicalDevice, SurfaceKHR};
 use ash::{Entry, vk};
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::borrow::Cow;
 use std::{error::Error, ffi, os::raw::c_char};
-use ash::ext::debug_utils;
-use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 unsafe extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
@@ -21,7 +23,7 @@ unsafe extern "system" fn vulkan_debug_callback(
         unsafe { ffi::CStr::from_ptr(callback_data.p_message).to_string_lossy() }
     };
 
-    println!("{message_severity:?}:\n{message_type:?} : {message}\n", );
+    println!("{message_severity:?}:\n{message_type:?} : {message}\n",);
 
     vk::FALSE
 }
@@ -40,21 +42,18 @@ fn create_instance(
         .engine_version(0)
         .api_version(vk::make_api_version(0, 1, 3, 0));
 
-    let layer_names = if enable_validation {
-        vec![c"VK_LAYER_KHRONOS_validation"]
+    let layer_names_raw: Vec<*const c_char> = if enable_validation {
+        vec![c"VK_LAYER_KHRONOS_validation"].iter().map(|name| name.as_ptr()).collect()
     } else {
-        vec![]
+        Vec::new()
     };
-    let layer_names_raw: Vec<*const c_char> =
-        layer_names.iter().map(|name| name.as_ptr()).collect();
 
-    let mut extension_names = if display_handle.is_some() {
-        ash_window::enumerate_required_extensions(*display_handle.unwrap())
-            .expect("failed to enumerate required extensions")
-            .to_vec()
-    } else {
-        vec![]
-    };
+    let mut extension_names = display_handle
+        .map_or(Vec::new(), |handle| {
+            ash_window::enumerate_required_extensions(*handle)
+                .expect("failed to enumerate required extensions")
+                .to_vec()
+        });
 
 
     enable_validation.then(|| {
@@ -88,14 +87,13 @@ impl QueueFamilyIndices {
     fn new(queue_family_properties: &Vec<vk::QueueFamilyProperties>) -> Self {
         Self {
             //Find the first queue family that supports both graphics and compute.
-            graphics_general: queue_family_properties
-                .iter()
-                .enumerate()
-                .find_map(|(index, info)| {
+            graphics_general: queue_family_properties.iter().enumerate().find_map(
+                |(index, info)| {
                     (info.queue_flags.contains(vk::QueueFlags::GRAPHICS)
                         && info.queue_flags.contains(vk::QueueFlags::COMPUTE))
-                        .then_some(index as u32)
-                }),
+                    .then_some(index as u32)
+                },
+            ),
             //Find the first dedicated compute queue family - that does not support graphics.
             async_compute: queue_family_properties
                 .iter()
@@ -103,7 +101,7 @@ impl QueueFamilyIndices {
                 .find_map(|(index, info)| {
                     (info.queue_flags.contains(vk::QueueFlags::COMPUTE)
                         && !info.queue_flags.contains(vk::QueueFlags::GRAPHICS))
-                        .then_some(index as u32)
+                    .then_some(index as u32)
                 }),
             //Find the first dedicated transfer queue family - that does not support graphics or compute.
             transfer: queue_family_properties
@@ -113,7 +111,7 @@ impl QueueFamilyIndices {
                     (info.queue_flags.contains(vk::QueueFlags::TRANSFER)
                         && !info.queue_flags.contains(vk::QueueFlags::GRAPHICS)
                         && !info.queue_flags.contains(vk::QueueFlags::COMPUTE))
-                        .then_some(index as u32)
+                    .then_some(index as u32)
                 }),
         }
     }
@@ -121,73 +119,107 @@ impl QueueFamilyIndices {
 
 fn create_device(
     instance: &ash::Instance,
-    display_handle: RawDisplayHandle,
-    window_handle: RawWindowHandle,
+    display_window_handles: Option<(RawDisplayHandle, RawWindowHandle)>,
     enable_validation: bool,
     loader: &Entry,
 ) -> Result<ash::Device, Box<dyn Error>> {
-
-
-    //Create a surface early so we can determine whether physical devices support it
-    let surface = unsafe {
-        ash_window::create_surface(loader, instance, display_handle, window_handle, None)
-            .expect("failed to create surface")
+    //Create a surface if we have a display and window handle
+    //If we don't then we're headless. This is a valid state in which surface will be None.
+    //If we do but surface creation fails, then we're in a bad state and surface should be Some(err)
+    let maybe_surface: Option<SurfaceKHR> = unsafe {
+        display_window_handles
+            .map(|(display_handle, window_handle)| {
+                ash_window::create_surface(loader, instance, display_handle, window_handle, None)
+            })
+            .transpose()?
     };
 
-    let surface_loader = unsafe { ash::khr::surface::Instance::new(loader, instance) };
+    //We'll load surface functions regardless of whether we have a surface or not.
+    let surface_loader = ash::khr::surface::Instance::new(loader, instance);
 
     //Get the list of available physical devices
-    let physical_devices = unsafe { instance.enumerate_physical_devices().expect("failed to enumerate physical devices") };
+    let physical_devices = unsafe {
+        instance
+            .enumerate_physical_devices()
+            .expect("failed to enumerate physical devices")
+    };
 
-    //Filter the list to only include physical devices that support the surface
-    let surface_supported_devices: Vec<ash::vk::PhysicalDevice> = unsafe {
-        physical_devices.into_iter()
-            .filter(|&physical_device|
-                instance.get_physical_device_queue_family_properties(physical_device)
-                    .iter()
-                    .enumerate()
-                    .any(|(index, queue_family_props)|
-                        surface_loader.get_physical_device_surface_support(physical_device, index as u32, surface)
-                            .unwrap()))
-            .collect()
+    //If we have a surface, filter the supported physical devices to only those that support it.
+    //If we don't, then we're in a headless state and we can (probably) use all physical devices.
+    let supported_physical_devices: Vec<PhysicalDevice> = unsafe {
+        if let Some(surface) = maybe_surface {
+            physical_devices
+                .into_iter()
+                .filter(|&physical_device| {
+                    instance
+                        .get_physical_device_queue_family_properties(physical_device)
+                        .iter()
+                        .enumerate()
+                        .any(|(index, _)| {
+                            surface_loader
+                                .get_physical_device_surface_support(
+                                    physical_device,
+                                    index as u32,
+                                    surface,
+                                )
+                                .unwrap()
+                        })
+                })
+                .collect()
+        } else {
+            physical_devices
+        }
     };
 
     //Find the first physical device that is a discrete GPU
     let selected_device = unsafe {
-        surface_supported_devices
+        supported_physical_devices
             .into_iter()
-            .find(|&physical_device|
-                instance.get_physical_device_properties(physical_device)
-                    .device_type == vk::PhysicalDeviceType::DISCRETE_GPU)
+            .find(|&physical_device| {
+                instance
+                    .get_physical_device_properties(physical_device)
+                    .device_type
+                    == vk::PhysicalDeviceType::DISCRETE_GPU
+            })
             .expect("failed to find a suitable GPU")
     };
 
     //Choose queue family indices for the device
     let queue_family_indices = unsafe {
         QueueFamilyIndices::new(
-            &instance.get_physical_device_queue_family_properties(selected_device))
+            &instance.get_physical_device_queue_family_properties(selected_device),
+        )
     };
 
-    let mut queue_create_infos : Vec<vk::DeviceQueueCreateInfo> = vec![];
+    let mut queue_create_infos: Vec<vk::DeviceQueueCreateInfo> = vec![];
+    let queue_priorities = [1.0];
 
     if let Some(graphics_index) = queue_family_indices.graphics_general {
-        queue_create_infos.push(vk::DeviceQueueCreateInfo::default()
-            .queue_family_index(graphics_index));
+        queue_create_infos
+            .push(vk::DeviceQueueCreateInfo::default()
+                .queue_family_index(graphics_index)
+                .queue_priorities(&queue_priorities));
     }
 
     if let Some(compute_index) = queue_family_indices.async_compute {
-        queue_create_infos.push(vk::DeviceQueueCreateInfo::default()
-            .queue_family_index(compute_index));
+        queue_create_infos
+            .push(vk::DeviceQueueCreateInfo::default()
+                .queue_family_index(compute_index)
+                .queue_priorities(&queue_priorities));
     }
 
     if let Some(transfer_index) = queue_family_indices.transfer {
-        queue_create_infos.push(vk::DeviceQueueCreateInfo::default()
-            .queue_family_index(transfer_index));
+        queue_create_infos
+            .push(vk::DeviceQueueCreateInfo::default()
+                .queue_family_index(transfer_index)
+                .queue_priorities(&queue_priorities));
     }
-    
-    let device_extension_names_raw = [
-        ash::khr::swapchain::NAME.as_ptr(),
-    ];
+
+
+
+    let device_extension_names_raw : Vec<*const c_char> = maybe_surface.map_or_else(Vec::new, |_| {
+        vec![ash::khr::swapchain::NAME.as_ptr(), ash::khr::surface::NAME.as_ptr()]
+    });
 
     enable_validation.then(|| {
         let debug_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
@@ -214,7 +246,7 @@ fn create_device(
     let device_create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_create_infos)
         .enabled_extension_names(&device_extension_names_raw);
-    
+
     unsafe {
         instance
             .create_device(selected_device, &device_create_info, None)
@@ -225,8 +257,11 @@ fn create_device(
 pub struct VulkanEngine {}
 
 impl VulkanEngine {
-    pub fn new(enable_validation: bool, display_handle: Option<RawDisplayHandle>,
-               window_handle: Option<RawWindowHandle>) -> Result<Self, Box<dyn Error>> {
+    pub fn new(
+        enable_validation: bool,
+        display_handle: Option<RawDisplayHandle>,
+        window_handle: Option<RawWindowHandle>,
+    ) -> Result<Self, Box<dyn Error>> {
         //Load entry point
         //'linked' here means compile-time static linkage against vulkan development libraries.
         let entry = unsafe { Entry::load()? };
@@ -244,12 +279,36 @@ pub fn add(left: u64, right: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use winit::{
+        event_loop::EventLoop,
+        window::Window,
+    };
 
     #[test]
     fn test_create_instance() {
         let entry = unsafe { Entry::load().expect("failed to load vulkan module") };
 
         create_instance(true, None, &entry).expect("Failed to create VordtEngine instance");
+    }
+
+    #[test]
+    fn test_create_device() {
+        let entry = unsafe { Entry::load().expect("failed to load vulkan module") };
+
+        let instance =
+            create_instance(true, None, &entry).expect("Failed to create VordtEngine instance");
+
+        create_device(&instance, None, false, &entry).expect("Failed to create VordtEngine device");
+    }
+
+    #[test]
+    fn test_create_window() {
+        let event_loop = EventLoop::new().expect("Failed to create event loop");
+    }
+
+    #[test]
+    fn test_create_windowed_device() {
+
     }
 
     #[test]
