@@ -1,5 +1,4 @@
 use ash::ext::debug_utils;
-use ash::prelude::VkResult;
 use ash::vk::{PhysicalDevice, SurfaceKHR};
 use ash::{Entry, vk};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
@@ -29,6 +28,12 @@ unsafe extern "system" fn vulkan_debug_callback(
 }
 
 //TODO: I could support multiple window handles here, or a headless mode.
+//Debated whether to pass in a list of window/surface extensions or a display handle.
+//I went with the display handle - conceptually the app is saying "I'm going to create these types
+//of windows," and the engine is determining what it needs to do that.
+//I don't think it is at all likely we'd need to support multiple display types - though xlib and
+//wayland may be possible.
+//TODO: Convert display_handle to a vector of display handles.
 fn create_instance(
     enable_validation: bool,
     display_handle: Option<&RawDisplayHandle>,
@@ -43,18 +48,19 @@ fn create_instance(
         .api_version(vk::make_api_version(0, 1, 3, 0));
 
     let layer_names_raw: Vec<*const c_char> = if enable_validation {
-        vec![c"VK_LAYER_KHRONOS_validation"].iter().map(|name| name.as_ptr()).collect()
+        vec![c"VK_LAYER_KHRONOS_validation"]
+            .iter()
+            .map(|name| name.as_ptr())
+            .collect()
     } else {
         Vec::new()
     };
 
-    let mut extension_names = display_handle
-        .map_or(Vec::new(), |handle| {
-            ash_window::enumerate_required_extensions(*handle)
-                .expect("failed to enumerate required extensions")
-                .to_vec()
-        });
-
+    let mut extension_names = display_handle.map_or(Vec::new(), |handle| {
+        ash_window::enumerate_required_extensions(*handle)
+            .expect("failed to enumerate required extensions")
+            .to_vec()
+    });
 
     enable_validation.then(|| {
         extension_names.push(debug_utils::NAME.as_ptr());
@@ -117,6 +123,8 @@ impl QueueFamilyIndices {
     }
 }
 
+//If display_window_handles is None, then we're in a headless state.
+//The engine should always be able to render to something, so it should always have a device.
 fn create_device(
     instance: &ash::Instance,
     display_window_handles: Option<(RawDisplayHandle, RawWindowHandle)>,
@@ -195,31 +203,31 @@ fn create_device(
     let queue_priorities = [1.0];
 
     if let Some(graphics_index) = queue_family_indices.graphics_general {
-        queue_create_infos
-            .push(vk::DeviceQueueCreateInfo::default()
+        queue_create_infos.push(
+            vk::DeviceQueueCreateInfo::default()
                 .queue_family_index(graphics_index)
-                .queue_priorities(&queue_priorities));
+                .queue_priorities(&queue_priorities),
+        );
     }
 
     if let Some(compute_index) = queue_family_indices.async_compute {
-        queue_create_infos
-            .push(vk::DeviceQueueCreateInfo::default()
+        queue_create_infos.push(
+            vk::DeviceQueueCreateInfo::default()
                 .queue_family_index(compute_index)
-                .queue_priorities(&queue_priorities));
+                .queue_priorities(&queue_priorities),
+        );
     }
 
     if let Some(transfer_index) = queue_family_indices.transfer {
-        queue_create_infos
-            .push(vk::DeviceQueueCreateInfo::default()
+        queue_create_infos.push(
+            vk::DeviceQueueCreateInfo::default()
                 .queue_family_index(transfer_index)
-                .queue_priorities(&queue_priorities));
+                .queue_priorities(&queue_priorities),
+        );
     }
 
-
-
-    let device_extension_names_raw : Vec<*const c_char> = maybe_surface.map_or_else(Vec::new, |_| {
-        vec![ash::khr::swapchain::NAME.as_ptr(), ash::khr::surface::NAME.as_ptr()]
-    });
+    let device_extension_names_raw: Vec<*const c_char> =
+        maybe_surface.map_or_else(Vec::new, |_| vec![ash::khr::swapchain::NAME.as_ptr()]);
 
     enable_validation.then(|| {
         let debug_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
@@ -254,21 +262,38 @@ fn create_device(
     }
 }
 
-pub struct VulkanEngine {}
+pub struct VulkanEngine {
+    entry: Entry,
+    instance: ash::Instance,
+    device: ash::Device,
+}
 
 impl VulkanEngine {
     pub fn new(
         enable_validation: bool,
-        display_handle: Option<RawDisplayHandle>,
-        window_handle: Option<RawWindowHandle>,
+        display_window_handles: Option<(RawDisplayHandle, RawWindowHandle)>,
     ) -> Result<Self, Box<dyn Error>> {
         //Load entry point
         //'linked' here means compile-time static linkage against vulkan development libraries.
-        let entry = unsafe { Entry::load()? };
+        let entry = Entry::linked();
 
-        let instance = { create_instance(enable_validation, display_handle.as_ref(), &entry)? };
+        let display_handle = display_window_handles
+            .as_ref()
+            .map(|(display_handle, _)| display_handle);
 
-        Ok(VulkanEngine {})
+        //TODO: should we panic if this fails? Depends on whether there is anything the engine or the
+        //      user can do to fix instance creation (update paths to missing layers, etc.)
+        let instance = create_instance(enable_validation, display_handle, &entry)?;
+
+        //Device creation could fail without a panic if the automatically selected physical device
+        // is unsuitable, but a suitable device can be enumerated.
+        let device = create_device(&instance, display_window_handles, enable_validation, &entry)?;
+
+        Ok(VulkanEngine {
+            entry,
+            instance,
+            device,
+        })
     }
 }
 
@@ -279,10 +304,7 @@ pub fn add(left: u64, right: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use winit::{
-        event_loop::EventLoop,
-        window::Window,
-    };
+    use winit::{event_loop::EventLoop, window::Window};
 
     #[test]
     fn test_create_instance() {
@@ -299,15 +321,5 @@ mod tests {
             create_instance(true, None, &entry).expect("Failed to create VordtEngine instance");
 
         create_device(&instance, None, false, &entry).expect("Failed to create VordtEngine device");
-    }
-
-    #[test]
-    fn test_create_window() {
-        let event_loop = EventLoop::new().expect("Failed to create event loop");
-    }
-
-    #[test]
-    fn test_create_windowed_device() {
-
     }
 }
