@@ -16,8 +16,8 @@ pub struct Swapchain {
 
 impl  Swapchain {
     pub fn new(
-        instance: ash::Instance,
-        device:   ash::Device,
+        instance: &ash::Instance,
+        device:   &ash::Device,
         surface: vk::SurfaceKHR,
         format: vk::SurfaceFormatKHR,
         extent: vk::Extent2D,

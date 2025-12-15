@@ -1,11 +1,8 @@
 mod swapchain;
 
-use ash::{
-    Entry,
-    ext::debug_utils,
-    vk,};
-use std::borrow::Cow;
+use ash::{Entry, ext::debug_utils, vk};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+use std::borrow::Cow;
 use std::{error::Error, ffi, os::raw::c_char};
 
 unsafe extern "system" fn vulkan_debug_callback(
@@ -130,75 +127,15 @@ impl QueueFamilyIndices {
 //The engine should always be able to render to something, so it should always have a device.
 fn create_device(
     instance: &ash::Instance,
-    display_window_handles: Option<(RawDisplayHandle, RawWindowHandle)>,
+    physical_device: vk::PhysicalDevice,
+    extension_names: Vec<*const c_char>,
     enable_validation: bool,
     loader: &Entry,
 ) -> Result<ash::Device, Box<dyn Error>> {
-    //Create a surface if we have a display and window handle
-    //If we don't then we're headless. This is a valid state in which surface will be None.
-    //If we do but surface creation fails, then we're in a bad state and surface should be Some(err)
-    let maybe_surface: Option<vk::SurfaceKHR> = unsafe {
-        display_window_handles
-            .map(|(display_handle, window_handle)| {
-                ash_window::create_surface(loader, instance, display_handle, window_handle, None)
-            })
-            .transpose()?
-    };
-
-    //We'll load surface functions regardless of whether we have a surface or not.
-    let surface_loader = ash::khr::surface::Instance::new(loader, instance);
-
-    //Get the list of available physical devices
-    let physical_devices = unsafe {
-        instance
-            .enumerate_physical_devices()
-            .expect("failed to enumerate physical devices")
-    };
-
-    //If we have a surface, filter the supported physical devices to only those that support it.
-    //If we don't, then we're in a headless state and we can (probably) use all physical devices.
-    let supported_physical_devices: Vec<vk::PhysicalDevice> = unsafe {
-        if let Some(surface) = maybe_surface {
-            physical_devices
-                .into_iter()
-                .filter(|&physical_device| {
-                    instance
-                        .get_physical_device_queue_family_properties(physical_device)
-                        .iter()
-                        .enumerate()
-                        .any(|(index, _)| {
-                            surface_loader
-                                .get_physical_device_surface_support(
-                                    physical_device,
-                                    index as u32,
-                                    surface,
-                                )
-                                .unwrap()
-                        })
-                })
-                .collect()
-        } else {
-            physical_devices
-        }
-    };
-
-    //Find the first physical device that is a discrete GPU
-    let selected_device = unsafe {
-        supported_physical_devices
-            .into_iter()
-            .find(|&physical_device| {
-                instance
-                    .get_physical_device_properties(physical_device)
-                    .device_type
-                    == vk::PhysicalDeviceType::DISCRETE_GPU
-            })
-            .expect("failed to find a suitable GPU")
-    };
-
     //Choose queue family indices for the device
     let queue_family_indices = unsafe {
         QueueFamilyIndices::new(
-            &instance.get_physical_device_queue_family_properties(selected_device),
+            &instance.get_physical_device_queue_family_properties(physical_device),
         )
     };
 
@@ -229,9 +166,6 @@ fn create_device(
         );
     }
 
-    let device_extension_names_raw: Vec<*const c_char> =
-        maybe_surface.map_or_else(Vec::new, |_| vec![ash::khr::swapchain::NAME.as_ptr()]);
-
     enable_validation.then(|| {
         let debug_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
             .message_severity(
@@ -256,11 +190,11 @@ fn create_device(
 
     let device_create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_create_infos)
-        .enabled_extension_names(&device_extension_names_raw);
+        .enabled_extension_names(&extension_names);
 
     unsafe {
         instance
-            .create_device(selected_device, &device_create_info, None)
+            .create_device(physical_device, &device_create_info, None)
             .map_err(|e| e.into())
     }
 }
@@ -270,7 +204,7 @@ pub struct VulkanEngine {
     instance: ash::Instance,
     device: ash::Device,
     surface_loader: ash::khr::surface::Instance,
-    swapchain: Option<swapchain::Swapchain>
+    swapchain: Option<swapchain::Swapchain>,
 }
 
 impl VulkanEngine {
@@ -290,32 +224,118 @@ impl VulkanEngine {
         //      user can do to fix instance creation (update paths to missing layers, etc.)
         let instance = create_instance(enable_validation, display_handle, &entry)?;
 
-        //Device creation could fail without a panic if the automatically selected physical device
-        // is unsuitable, but a suitable device can be enumerated.
-        let device = create_device(&instance, display_window_handles, enable_validation, &entry)?;
-
         //We'll load surface functions regardless of whether we have a surface or not.
         let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
 
-        let surface_format = surface_loader.get_physical_device_surface_formats()
+        //Get the list of available physical devices
+        let physical_devices = unsafe {
+            instance
+                .enumerate_physical_devices()
+                .expect("failed to enumerate physical devices")
+        };
+
+        //Create a surface if we have a display and window handle
+        //If we don't then we're headless. This is a valid state in which surface will be None.
+        //If we do but surface creation fails, then we're in a bad state and surface should be Some(err)
+        let maybe_surface: Option<vk::SurfaceKHR> = unsafe {
+            display_window_handles
+                .map(|(display_handle, window_handle)| {
+                    ash_window::create_surface(
+                        &entry,
+                        &instance,
+                        display_handle,
+                        window_handle,
+                        None,
+                    )
+                })
+                .transpose()?
+        };
+
+        let device_extension_names_raw: Vec<*const c_char> =
+            maybe_surface.map_or_else(Vec::new, |_| vec![ash::khr::swapchain::NAME.as_ptr()]);
+
+        //If we have a surface, filter the supported physical devices to only those that support it.
+        //If we don't, then we're in a headless state and we can (probably) use all physical devices.
+        let supported_physical_devices: Vec<vk::PhysicalDevice> = unsafe {
+            if let Some(surface) = maybe_surface {
+                physical_devices
+                    .into_iter()
+                    .filter(|&physical_device| {
+                        instance
+                            .get_physical_device_queue_family_properties(physical_device)
+                            .iter()
+                            .enumerate()
+                            .any(|(index, _)| {
+                                surface_loader
+                                    .get_physical_device_surface_support(
+                                        physical_device,
+                                        index as u32,
+                                        surface,
+                                    )
+                                    .unwrap()
+                            })
+                    })
+                    .collect()
+            } else {
+                physical_devices
+            }
+        };
+
+        //Find the first physical device that is a discrete GPU
+        let selected_device = unsafe {
+            supported_physical_devices
+                .into_iter()
+                .find(|&physical_device| {
+                    instance
+                        .get_physical_device_properties(physical_device)
+                        .device_type
+                        == vk::PhysicalDeviceType::DISCRETE_GPU
+                })
+                .expect("failed to find a suitable GPU")
+        };
+
+        //Device creation could fail without a panic if the automatically selected physical device
+        // is unsuitable, but a suitable device can be enumerated.
+        let device = create_device(
+            &instance,
+            selected_device,
+            device_extension_names_raw,
+            enable_validation,
+            &entry,
+        )?;
 
         let swapchain = display_window_handles.map(|(display_handle, window_handle)| {
             let surface = unsafe {
-                let surface = ash_window::create_surface(&entry,
-                                           &instance,
-                                           display_handle,
-                                           window_handle,
-                                           None)
-                    .expect("failed to create surface");
+                ash_window::create_surface(&entry, &instance, display_handle, window_handle, None)
+                    .expect("failed to create surface")
             };
 
-            swapchain::Swapchain::new(instance, device, surface, vk::Format::B8G8R8A8_SRGB, )
+            let surface_format = unsafe {
+                surface_loader
+                    .get_physical_device_surface_formats(selected_device, surface)
+                    .unwrap()[0]
+            };
+            let surface_capabilities = unsafe {
+                surface_loader
+                    .get_physical_device_surface_capabilities(selected_device, surface)
+                    .unwrap()
+            };
+            swapchain::Swapchain::new(
+                &instance,
+                &device,
+                surface,
+                surface_format,
+                surface_capabilities.current_extent,
+                surface_capabilities.min_image_count,
+            )
         });
 
         Ok(VulkanEngine {
             entry,
             instance,
             device,
+            surface_loader,
+            swapchain,
         })
     }
 }
