@@ -1,15 +1,18 @@
-use ash::ext::debug_utils;
-use ash::vk::{PhysicalDevice, SurfaceKHR};
-use ash::{Entry, vk};
-use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+mod swapchain;
+
+use ash::{
+    Entry,
+    ext::debug_utils,
+    vk,};
 use std::borrow::Cow;
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::{error::Error, ffi, os::raw::c_char};
 
 unsafe extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     message_type: vk::DebugUtilsMessageTypeFlagsEXT,
     p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
-    p_user_data: *mut std::os::raw::c_void,
+    _p_user_data: *mut std::os::raw::c_void,
 ) -> vk::Bool32 {
     //TODO: It should be possible to make this function safe if we can determine the maximum length
     //      of the message - If so we can check if the string in null terminated.
@@ -36,7 +39,7 @@ unsafe extern "system" fn vulkan_debug_callback(
 //TODO: Convert display_handle to a vector of display handles.
 fn create_instance(
     enable_validation: bool,
-    display_handle: Option<&RawDisplayHandle>,
+    display_handle: Option<RawDisplayHandle>,
     loader: &Entry,
 ) -> Result<ash::Instance, Box<dyn Error>> {
     //todo: app name, version, etc.
@@ -57,7 +60,7 @@ fn create_instance(
     };
 
     let mut extension_names = display_handle.map_or(Vec::new(), |handle| {
-        ash_window::enumerate_required_extensions(*handle)
+        ash_window::enumerate_required_extensions(handle)
             .expect("failed to enumerate required extensions")
             .to_vec()
     });
@@ -134,7 +137,7 @@ fn create_device(
     //Create a surface if we have a display and window handle
     //If we don't then we're headless. This is a valid state in which surface will be None.
     //If we do but surface creation fails, then we're in a bad state and surface should be Some(err)
-    let maybe_surface: Option<SurfaceKHR> = unsafe {
+    let maybe_surface: Option<vk::SurfaceKHR> = unsafe {
         display_window_handles
             .map(|(display_handle, window_handle)| {
                 ash_window::create_surface(loader, instance, display_handle, window_handle, None)
@@ -154,7 +157,7 @@ fn create_device(
 
     //If we have a surface, filter the supported physical devices to only those that support it.
     //If we don't, then we're in a headless state and we can (probably) use all physical devices.
-    let supported_physical_devices: Vec<PhysicalDevice> = unsafe {
+    let supported_physical_devices: Vec<vk::PhysicalDevice> = unsafe {
         if let Some(surface) = maybe_surface {
             physical_devices
                 .into_iter()
@@ -266,6 +269,8 @@ pub struct VulkanEngine {
     entry: Entry,
     instance: ash::Instance,
     device: ash::Device,
+    surface_loader: ash::khr::surface::Instance,
+    swapchain: Option<swapchain::Swapchain>
 }
 
 impl VulkanEngine {
@@ -277,9 +282,9 @@ impl VulkanEngine {
         //'linked' here means compile-time static linkage against vulkan development libraries.
         let entry = Entry::linked();
 
-        let display_handle = display_window_handles
-            .as_ref()
-            .map(|(display_handle, _)| display_handle);
+        let (display_handle, window_handle) = display_window_handles
+            .map(|(d, w)| (Some(d), Some(w)))
+            .unwrap_or((None, None));
 
         //TODO: should we panic if this fails? Depends on whether there is anything the engine or the
         //      user can do to fix instance creation (update paths to missing layers, etc.)
@@ -288,6 +293,24 @@ impl VulkanEngine {
         //Device creation could fail without a panic if the automatically selected physical device
         // is unsuitable, but a suitable device can be enumerated.
         let device = create_device(&instance, display_window_handles, enable_validation, &entry)?;
+
+        //We'll load surface functions regardless of whether we have a surface or not.
+        let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
+
+        let surface_format = surface_loader.get_physical_device_surface_formats()
+
+        let swapchain = display_window_handles.map(|(display_handle, window_handle)| {
+            let surface = unsafe {
+                let surface = ash_window::create_surface(&entry,
+                                           &instance,
+                                           display_handle,
+                                           window_handle,
+                                           None)
+                    .expect("failed to create surface");
+            };
+
+            swapchain::Swapchain::new(instance, device, surface, vk::Format::B8G8R8A8_SRGB, )
+        });
 
         Ok(VulkanEngine {
             entry,
