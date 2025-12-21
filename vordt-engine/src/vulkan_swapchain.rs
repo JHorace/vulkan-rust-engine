@@ -14,7 +14,7 @@ pub struct Swapchain {
     image_views: Vec<vk::ImageView>,
 }
 
-impl  Swapchain {
+impl Swapchain {
     pub fn new(
         instance: &ash::Instance,
         device:   &ash::Device,

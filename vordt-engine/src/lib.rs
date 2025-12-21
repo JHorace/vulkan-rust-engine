@@ -1,9 +1,18 @@
-mod swapchain;
+mod vulkan_swapchain;
+mod physical_device_utils;
 
-use ash::{Entry, ext::debug_utils, vk};
+use ash::{
+    ext::debug_utils,
+    khr::{surface, swapchain},
+    vk, Device, Entry, Instance,
+};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::borrow::Cow;
 use std::{error::Error, ffi, os::raw::c_char};
+
+use physical_device_utils::*;
+
+pub const NUM_FRAMES_IN_FLIGHT: usize = 3;
 
 unsafe extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
@@ -36,10 +45,10 @@ unsafe extern "system" fn vulkan_debug_callback(
 //TODO: Convert display_handle to a vector of display handles.
 fn create_instance(
     enable_validation: bool,
-    display_handle: Option<RawDisplayHandle>,
+        display_handle: Option<RawDisplayHandle>,
     loader: &Entry,
 ) -> Result<ash::Instance, Box<dyn Error>> {
-    //todo: app name, version, etc.
+    //todo: app name, version, etc.4
     let application_info = vk::ApplicationInfo::default()
         .application_name(c"vordt-engine")
         .application_version(0)
@@ -81,64 +90,17 @@ fn create_instance(
     }
 }
 
-struct QueueFamilyIndices {
-    graphics_general: Option<u32>,
-    async_compute: Option<u32>,
-    transfer: Option<u32>,
-}
-
-impl QueueFamilyIndices {
-    //TODO: This is inefficient
-
-    fn new(queue_family_properties: &Vec<vk::QueueFamilyProperties>) -> Self {
-        Self {
-            //Find the first queue family that supports both graphics and compute.
-            graphics_general: queue_family_properties.iter().enumerate().find_map(
-                |(index, info)| {
-                    (info.queue_flags.contains(vk::QueueFlags::GRAPHICS)
-                        && info.queue_flags.contains(vk::QueueFlags::COMPUTE))
-                    .then_some(index as u32)
-                },
-            ),
-            //Find the first dedicated compute queue family - that does not support graphics.
-            async_compute: queue_family_properties
-                .iter()
-                .enumerate()
-                .find_map(|(index, info)| {
-                    (info.queue_flags.contains(vk::QueueFlags::COMPUTE)
-                        && !info.queue_flags.contains(vk::QueueFlags::GRAPHICS))
-                    .then_some(index as u32)
-                }),
-            //Find the first dedicated transfer queue family - that does not support graphics or compute.
-            transfer: queue_family_properties
-                .iter()
-                .enumerate()
-                .find_map(|(index, info)| {
-                    (info.queue_flags.contains(vk::QueueFlags::TRANSFER)
-                        && !info.queue_flags.contains(vk::QueueFlags::GRAPHICS)
-                        && !info.queue_flags.contains(vk::QueueFlags::COMPUTE))
-                    .then_some(index as u32)
-                }),
-        }
-    }
-}
 
 //If display_window_handles is None, then we're in a headless state.
 //The engine should always be able to render to something, so it should always have a device.
 fn create_device(
     instance: &ash::Instance,
     physical_device: vk::PhysicalDevice,
+    queue_family_indices: QueueFamilyIndices,
     extension_names: Vec<*const c_char>,
     enable_validation: bool,
     loader: &Entry,
 ) -> Result<ash::Device, Box<dyn Error>> {
-    //Choose queue family indices for the device
-    let queue_family_indices = unsafe {
-        QueueFamilyIndices::new(
-            &instance.get_physical_device_queue_family_properties(physical_device),
-        )
-    };
-
     let mut queue_create_infos: Vec<vk::DeviceQueueCreateInfo> = vec![];
     let queue_priorities = [1.0];
 
@@ -203,8 +165,10 @@ pub struct VulkanEngine {
     entry: Entry,
     instance: ash::Instance,
     device: ash::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
     surface_loader: ash::khr::surface::Instance,
-    swapchain: Option<swapchain::Swapchain>,
+    swapchain: Option<vulkan_swapchain::Swapchain>,
 }
 
 impl VulkanEngine {
@@ -256,53 +220,39 @@ impl VulkanEngine {
 
         //If we have a surface, filter the supported physical devices to only those that support it.
         //If we don't, then we're in a headless state and we can (probably) use all physical devices.
-        let supported_physical_devices: Vec<vk::PhysicalDevice> = unsafe {
-            if let Some(surface) = maybe_surface {
-                physical_devices
-                    .into_iter()
-                    .filter(|&physical_device| {
-                        instance
-                            .get_physical_device_queue_family_properties(physical_device)
-                            .iter()
-                            .enumerate()
-                            .any(|(index, _)| {
-                                surface_loader
-                                    .get_physical_device_surface_support(
-                                        physical_device,
-                                        index as u32,
-                                        surface,
-                                    )
-                                    .unwrap()
-                            })
-                    })
-                    .collect()
-            } else {
-                physical_devices
-            }
+        let supported_physical_devices: Vec<vk::PhysicalDevice> = if let Some(surface) = maybe_surface {
+            get_physical_devices_supporting_surface(physical_devices, &instance, surface, &surface_loader)
+        } else {
+            physical_devices
         };
 
         //Find the first physical device that is a discrete GPU
-        let selected_device = unsafe {
-            supported_physical_devices
-                .into_iter()
-                .find(|&physical_device| {
-                    instance
-                        .get_physical_device_properties(physical_device)
-                        .device_type
-                        == vk::PhysicalDeviceType::DISCRETE_GPU
-                })
-                .expect("failed to find a suitable GPU")
-        };
+        let selected_device = select_physical_device(supported_physical_devices, &instance);
+
+        let queue_family_properties = unsafe {instance.get_physical_device_queue_family_properties(selected_device)};
+
+        let queue_family_indices = QueueFamilyIndices::new(
+            &queue_family_properties
+        );
 
         //Device creation could fail without a panic if the automatically selected physical device
         // is unsuitable, but a suitable device can be enumerated.
         let device = create_device(
             &instance,
             selected_device,
+            queue_family_indices,
             device_extension_names_raw,
             enable_validation,
             &entry,
         )?;
+
+        let queue = unsafe {Device::get_device_queue(&device, queue_family_indices.graphics_general.unwrap(), 0)};
+
+        let command_pool_create_info = vk::CommandPoolCreateInfo::default()
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+            .queue_family_index(queue_family_indices.graphics_general.unwrap());
+
+        let command_pool = unsafe {device.create_command_pool(&command_pool_create_info, None).expect("failed to create command pool")};
 
         let swapchain = display_window_handles.map(|(display_handle, window_handle)| {
             let surface = unsafe {
@@ -320,7 +270,7 @@ impl VulkanEngine {
                     .get_physical_device_surface_capabilities(selected_device, surface)
                     .unwrap()
             };
-            swapchain::Swapchain::new(
+            vulkan_swapchain::Swapchain::new(
                 &instance,
                 &device,
                 surface,
@@ -334,6 +284,8 @@ impl VulkanEngine {
             entry,
             instance,
             device,
+            queue,
+            command_pool,
             surface_loader,
             swapchain,
         })
