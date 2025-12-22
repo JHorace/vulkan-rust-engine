@@ -167,6 +167,7 @@ pub struct VulkanEngine {
     device: ash::Device,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
+    one_time_command_buffer: vk::CommandBuffer,
     surface_loader: ash::khr::surface::Instance,
     swapchain: Option<vulkan_swapchain::Swapchain>,
 }
@@ -254,6 +255,14 @@ impl VulkanEngine {
 
         let command_pool = unsafe {device.create_command_pool(&command_pool_create_info, None).expect("failed to create command pool")};
 
+        let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
+            .command_buffer_count(1)
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY);
+
+        let one_time_command_buffer = unsafe { device.allocate_command_buffers(&command_buffer_allocate_info)
+            .unwrap()[0] };
+
         let swapchain = display_window_handles.map(|(display_handle, window_handle)| {
             let surface = unsafe {
                 ash_window::create_surface(&entry, &instance, display_handle, window_handle, None)
@@ -286,15 +295,56 @@ impl VulkanEngine {
             device,
             queue,
             command_pool,
+            one_time_command_buffer,
             surface_loader,
             swapchain,
         })
     }
+
+    pub fn record_and_submit_one_time_command_buffer<F: FnOnce(&Device, vk::CommandBuffer)>(&self, f: F) {
+        unsafe {
+            self.record_command_buffer(self.one_time_command_buffer, f);
+
+            self.device.queue_wait_idle(self.queue).expect("failed to wait for queue idle");
+
+            self.submit_command_buffer(self.one_time_command_buffer);
+
+            self.device.queue_wait_idle(self.queue).expect("failed to wait for queue idle");
+        }
+    }
+
+    pub fn record_command_buffer<F: FnOnce(&Device, vk::CommandBuffer)>(&self, command_buffer: vk::CommandBuffer, f: F) {
+        unsafe {
+            self.device.reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::RELEASE_RESOURCES)
+                .expect("failed to reset command buffer");
+
+            let command_buffer_begin_info = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+            self.device.begin_command_buffer(command_buffer, &command_buffer_begin_info)
+                .expect("failed to begin command buffer");
+
+            f(&self.device, command_buffer);
+
+            self.device.end_command_buffer(command_buffer)
+                .expect("failed to end command buffer");
+        }
+    }
+
+    pub fn submit_command_buffer(&self, command_buffer: vk::CommandBuffer) {
+        unsafe {
+            let command_buffers = vec![command_buffer];
+
+            let submit_info = vk::SubmitInfo::default()
+                .command_buffers(&command_buffers);
+
+            self.device.queue_submit(self.queue, &[submit_info], vk::Fence::null())
+                .expect("failed to submit command buffer");
+        }
+    }
 }
 
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+
 
 #[cfg(test)]
 mod tests {
@@ -315,6 +365,31 @@ mod tests {
         let instance =
             create_instance(true, None, &entry).expect("Failed to create VordtEngine instance");
 
-        create_device(&instance, None, false, &entry).expect("Failed to create VordtEngine device");
+        let physical_devices = unsafe {
+            instance
+                .enumerate_physical_devices()
+                .expect("failed to enumerate physical devices")
+        };
+
+        let physical_device = select_physical_device(physical_devices, &instance);
+
+        let queue_family_properties = unsafe {instance.get_physical_device_queue_family_properties(physical_device)};
+
+        let queue_family_indices = QueueFamilyIndices::new(
+            &queue_family_properties
+        );
+
+        create_device(&instance, physical_device, queue_family_indices, Vec::new(), true, &entry).expect("Failed to create VordtEngine device");
+    }
+
+    #[test]
+    fn test_create_engine() {
+        VulkanEngine::new(true, None).expect("Failed to create VordtEngine");
+    }
+
+    #[test]
+    fn test_submit_command_buffer() {
+        let engine = VulkanEngine::new(true, None).expect("Failed to create VordtEngine");
+        engine.record_and_submit_one_time_command_buffer(|_, _| {});
     }
 }
