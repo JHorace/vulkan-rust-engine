@@ -9,5 +9,5 @@ ash-window = "0.13.0"
 raw-window-handle = "0.6.2"
 
 [dev-dependencies]
-winit = "0.30.11"
+winit = "0.31.0-beta.2"
 

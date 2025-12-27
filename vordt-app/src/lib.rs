@@ -5,75 +5,48 @@ use winit::platform::x11::EventLoopBuilderExtX11;
 use winit::raw_window_handle::{
     HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
 };
+
+use winit::event_loop::{EventLoopProxy, EventLoopBuilder, ActiveEventLoop};
+
 use winit::{
-    application::ApplicationHandler, event::Event::UserEvent, event::WindowEvent,
-    event_loop::ActiveEventLoop, event_loop::EventLoop, window::Window, window::WindowAttributes,
-    window::WindowId, dpi::LogicalSize,
+    application::ApplicationHandler, event::WindowEvent,
+    window::Window, window::WindowAttributes,
+    window::WindowId,
 };
 use winit::dpi::Size;
+use winit::platform::wayland::ActiveEventLoopExtWayland;
 
 //Vulkan engine app that uses a window
 //Window is an Option because it is not guaranteed to exist until the resumed event is emitted.
 //Engine is an Option because we can't create a windowed engine without a window.
+#[derive(Default)]
 pub struct EngineApplication {
-    window: Option<Window>,
-    window_attributes: WindowAttributes,
+    window: Option<Box<dyn Window>>,
     engine: Option<VulkanEngine>,
 }
 
+
 impl ApplicationHandler for EngineApplication {
-    //Emitted when the application has been resumed.
-    //It is recommended that applications only initialize their graphics context and create a window
-    //after a resumed event has been first emitted.
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_none() {
-            self.window = event_loop.create_window(WindowAttributes::default()).ok();
-
-            let display_handle = self
-                .window
-                .as_ref()
-                .unwrap()
-                .display_handle()
-                .unwrap()
-                .as_raw();
-
-            self.engine = Some(VulkanEngine::new(true, Some(display_handle)).expect("Failed to create VulkanEngine"));
-
-            let window_handle = self
-                .window
-                .as_ref()
-                .unwrap()
-                .window_handle()
-                .unwrap()
-                .as_raw();
-
-            self.engine.as_mut().unwrap().add_window(display_handle, window_handle, 800, 600);
-        }
+    fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
+        self.window = Some(event_loop.create_window(WindowAttributes::default()).expect("Failed to create window"));
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+    fn window_event(&mut self,
+                    event_loop: &dyn ActiveEventLoop,
+                    id: WindowId,
+                    event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
                 println!("Window close requested, closing...");
                 event_loop.exit();
             }
+            WindowEvent::RedrawRequested => {
+                self.window.as_ref().unwrap().request_redraw();
+            }
             _ => println!("Window event: {:?}", event),
         }
     }
-}
 
-impl EngineApplication {
-    pub fn new(window_width: u32, window_height: u32) -> EngineApplication {
-
-        let window_attributes = WindowAttributes::default()
-            .with_inner_size(LogicalSize::new(window_width, window_height));
-
-        EngineApplication {
-            window: None,
-            window_attributes,
-            engine: None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -82,19 +55,21 @@ mod tests {
     use platform::x11;
     use vordt_engine::VulkanEngine;
     use winit::event::WindowEvent::CloseRequested;
+    use winit::event_loop::ControlFlow;
     use winit::platform;
     use winit::platform::wayland::EventLoopBuilderExtWayland;
 
+    #[derive(Default)]
     struct TestAppEmpty;
 
     impl ApplicationHandler for TestAppEmpty {
-        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
             event_loop.exit()
         }
 
         fn window_event(
             &mut self,
-            _event_loop: &ActiveEventLoop,
+            _event_loop: &dyn ActiveEventLoop,
             _: WindowId,
             _event: WindowEvent,
         ) {
@@ -104,36 +79,46 @@ mod tests {
     //Simple test that creates an app, runs it, and immediately exits.
     #[test]
     fn test_create_xlib_app() {
-        //EventLoop is intended to run on the main thread - but tests run in parallel on arbitrary threads
-        //So we use the with_any_thread method to specify that we want to run on any thread.
-        let event_loop =
-            x11::EventLoopBuilderExtX11::with_any_thread(&mut EventLoop::builder(), true)
-                .build()
-                .expect("Failed to create event loop");
+        let event_loop = EventLoopBuilderExtX11::with_any_thread(EventLoopBuilder::default().with_x11(), true)
+            .build()
+            .expect("vordt-app: winit could not create an event loop");
 
-        let mut app = TestAppEmpty {};
-        event_loop.run_app(&mut app).expect("Failed to run app")
+        event_loop.run_app(TestAppEmpty::default()).expect("Failed to run app")
     }
 
     #[test]
     fn test_create_wayland_app() {
-        let event_loop =
-            EventLoopBuilderExtWayland::with_any_thread(&mut EventLoop::builder(), true)
-                .build()
-                .expect("Failed to create event loop");
+        let event_loop = EventLoopBuilderExtWayland::with_any_thread(EventLoopBuilder::default().with_wayland(), true)
+            .build()
+            .expect("vordt-app: winit could not create an event loop");
 
-        let mut app = TestAppEmpty {};
-        event_loop.run_app(&mut app).expect("Failed to run app")
+        event_loop.run_app(TestAppEmpty::default()).expect("Failed to run app")
     }
 
     #[test]
     fn test_create_vordt_app() {
-        let event_loop = EventLoopBuilderExtWayland::with_any_thread(&mut EventLoop::builder(), true)
+        let event_loop = EventLoopBuilderExtWayland::with_any_thread(EventLoopBuilder::default().with_wayland(), true)
             .build()
             .expect("vordt-app: winit could not create an event loop");
 
-        let mut app = EngineApplication::new(800, 600);
-        event_loop.run_app(&mut app).expect("Failed to run app")
+        event_loop.set_control_flow(ControlFlow::Poll);
+
+        let app = EngineApplication::default();
+
+        event_loop.run_app(app).expect("Failed to run app");
+    }
+
+    #[test]
+    fn test_clear_color() {
+        let event_loop = EventLoopBuilderExtWayland::with_any_thread(EventLoopBuilder::default().with_wayland(), true)
+            .build()
+            .expect("vordt-app: winit could not create an event loop");
+
+        event_loop.set_control_flow(ControlFlow::Poll);
+
+        let app = EngineApplication::default();
+
+        event_loop.run_app(app).expect("Failed to run app")
     }
 
 }

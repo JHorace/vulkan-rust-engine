@@ -1,8 +1,9 @@
 mod vulkan_swapchain;
 mod physical_device_utils;
+mod command_buffers;
 
 use ash::{
-    ext::debug_utils,
+    ext::{debug_utils, shader_object},
     khr::{surface, swapchain},
     vk, Device, Entry, Instance,
 };
@@ -47,7 +48,7 @@ fn create_instance(
     enable_validation: bool,
     display_handle: Option<RawDisplayHandle>,
     loader: &Entry,
-) -> Result<ash::Instance, Box<dyn Error>> {
+) -> Result<Instance, Box<dyn Error>> {
     //todo: app name, version, etc.4
     let application_info = vk::ApplicationInfo::default()
         .application_name(c"vordt-engine")
@@ -94,13 +95,13 @@ fn create_instance(
 //If display_window_handles is None, then we're in a headless state.
 //The engine should always be able to render to something, so it should always have a device.
 fn create_device(
-    instance: &ash::Instance,
+    instance: &Instance,
     physical_device: vk::PhysicalDevice,
     queue_family_indices: QueueFamilyIndices,
-    extension_names: Vec<*const c_char>,
     enable_validation: bool,
+    headless: bool,
     loader: &Entry,
-) -> Result<ash::Device, Box<dyn Error>> {
+) -> Result<Device, Box<dyn Error>> {
     let mut queue_create_infos: Vec<vk::DeviceQueueCreateInfo> = vec![];
     let queue_priorities = [1.0];
 
@@ -150,9 +151,17 @@ fn create_device(
         };
     });
 
+    let device_extension_names_raw: Vec<*const c_char> = [shader_object::NAME.as_ptr()]
+        .into_iter()
+        .chain((!headless).then_some(swapchain::NAME.as_ptr()))
+        .collect();
+
+    let mut shader_object_features = vk::PhysicalDeviceShaderObjectFeaturesEXT::default();
+
     let device_create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_create_infos)
-        .enabled_extension_names(&extension_names);
+        .enabled_extension_names(&device_extension_names_raw)
+        .push_next(&mut shader_object_features);
 
     unsafe {
         instance
@@ -163,13 +172,14 @@ fn create_device(
 
 pub struct VulkanEngine {
     entry: Entry,
-    instance: ash::Instance,
+    instance: Instance,
     physical_device: vk::PhysicalDevice,
-    device: ash::Device,
+    device: Device,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
     one_time_command_buffer: vk::CommandBuffer,
-    surface_loader: ash::khr::surface::Instance,
+    surface_loader: surface::Instance,
+    shader_object_loader: shader_object::Device,
     swapchain: Option<vulkan_swapchain::Swapchain>,
 }
 
@@ -187,7 +197,7 @@ impl VulkanEngine {
         let instance = create_instance(enable_validation, display_handle, &entry)?;
 
         //We'll load surface functions regardless of whether we have a surface or not.
-        let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
+        let surface_loader = surface::Instance::new(&entry, &instance);
 
         //Get the list of available physical devices
         let physical_devices = unsafe {
@@ -195,12 +205,6 @@ impl VulkanEngine {
                 .enumerate_physical_devices()
                 .expect("failed to enumerate physical devices")
         };
-
-        let device_extension_names_raw: Vec<*const c_char> =
-            display_handle.map_or_else(Vec::new, |_| vec![ash::khr::swapchain::NAME.as_ptr()]);
-
-        //If we have a surface, filter the supported physical devices to only those that support it.
-        //If we don't, then we're in a headless state and we can (probably) use all physical devices.
 
         //Find the first physical device that is a discrete GPU
         let physical_device = select_physical_device(physical_devices, &instance);
@@ -211,13 +215,13 @@ impl VulkanEngine {
             &queue_family_properties
         );
 
+
         //Device creation could fail without a panic if the automatically selected physical device
         // is unsuitable, but a suitable device can be enumerated.
         let device = create_device(
             &instance,
             physical_device,
             queue_family_indices,
-            device_extension_names_raw,
             enable_validation,
             &entry,
         )?;
@@ -237,6 +241,9 @@ impl VulkanEngine {
 
         let one_time_command_buffer = unsafe { device.allocate_command_buffers(&command_buffer_allocate_info)
             .unwrap()[0] };
+
+        let shader_object_loader = shader_object::Device::new(&instance, &device);
+
         Ok(VulkanEngine {
             entry,
             instance,
@@ -246,6 +253,7 @@ impl VulkanEngine {
             command_pool,
             one_time_command_buffer,
             surface_loader,
+            shader_object_loader,
             swapchain: None,
         })
     }
