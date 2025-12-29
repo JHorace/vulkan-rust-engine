@@ -1130,28 +1130,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6ccf251212114b54433ec949fd6a7841275f9ada20dddd2f29e9ceea4501493"
 
 [[package]]
-name = "version_check"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vordt-app"
+name = "varre-app"
 version = "0.1.0"
 dependencies = [
- "vordt-engine",
+ "varre-engine",
  "winit",
 ]
 
 [[package]]
-name = "vordt-engine"
+name = "varre-assets"
+version = "0.1.0"
+
+[[package]]
+name = "varre-engine"
 version = "0.1.0"
 dependencies = [
  "ash",
  "ash-window",
  "raw-window-handle",
+ "varre-assets",
  "winit",
 ]
+
+[[package]]
+name = "version_check"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "walkdir"

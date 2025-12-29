@@ -59,9 +59,9 @@ impl VulkanEngine {
             {
                 // Setting viewport, scissor, and rasterizer discard is required before draw w/ shader object.
                 let viewport = [vk::Viewport::default().width(area.extent.width as f32).height(area.extent.height as f32)];
-                self.device.cmd_set_viewport_with_count(cmd,  &viewport);
+                self.device.cmd_set_viewport_with_count(cmd, &viewport);
                 let scissor = [vk::Rect2D::default().extent(area.extent)];
-                self.device.cmd_set_scissor_with_count(cmd,  &scissor);
+                self.device.cmd_set_scissor_with_count(cmd, &scissor);
                 self.device.cmd_set_rasterizer_discard_enable(cmd, false);
 
                 // Setting vertex input, primitive topology, primitive restart, and polygon mode is required before draw w/ shader object, if a vertex shader is bound.

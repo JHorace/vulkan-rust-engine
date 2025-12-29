@@ -1,5 +1,5 @@
 [package]
-name = "vordt-engine"
+name = "varre-engine"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,6 +7,7 @@ edition = "2024"
 ash = { version = "0.38.0", features = ["linked"] }
 ash-window = "0.13.0"
 raw-window-handle = "0.6.2"
+varre-assets = { workspace = true }
 
 [dev-dependencies]
 winit = "0.31.0-beta.2"

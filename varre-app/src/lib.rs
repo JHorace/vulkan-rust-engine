@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use vordt_engine::VulkanEngine;
+use varre_engine::VulkanEngine;
 use winit::error::EventLoopError;
 use winit::platform::x11::EventLoopBuilderExtX11;
 use winit::raw_window_handle::{
@@ -53,7 +53,7 @@ impl ApplicationHandler for EngineApplication {
 mod tests {
     use super::*;
     use platform::x11;
-    use vordt_engine::VulkanEngine;
+    use varre_engine::VulkanEngine;
     use winit::event::WindowEvent::CloseRequested;
     use winit::event_loop::ControlFlow;
     use winit::platform;
@@ -81,7 +81,7 @@ mod tests {
     fn test_create_xlib_app() {
         let event_loop = EventLoopBuilderExtX11::with_any_thread(EventLoopBuilder::default().with_x11(), true)
             .build()
-            .expect("vordt-app: winit could not create an event loop");
+            .expect("varre-app: winit could not create an event loop");
 
         event_loop.run_app(TestAppEmpty::default()).expect("Failed to run app")
     }
@@ -90,16 +90,16 @@ mod tests {
     fn test_create_wayland_app() {
         let event_loop = EventLoopBuilderExtWayland::with_any_thread(EventLoopBuilder::default().with_wayland(), true)
             .build()
-            .expect("vordt-app: winit could not create an event loop");
+            .expect("varre-app: winit could not create an event loop");
 
         event_loop.run_app(TestAppEmpty::default()).expect("Failed to run app")
     }
 
     #[test]
-    fn test_create_vordt_app() {
+    fn test_create_varre_app() {
         let event_loop = EventLoopBuilderExtWayland::with_any_thread(EventLoopBuilder::default().with_wayland(), true)
             .build()
-            .expect("vordt-app: winit could not create an event loop");
+            .expect("varre-app: winit could not create an event loop");
 
         event_loop.set_control_flow(ControlFlow::Poll);
 
@@ -112,7 +112,7 @@ mod tests {
     fn test_clear_color() {
         let event_loop = EventLoopBuilderExtWayland::with_any_thread(EventLoopBuilder::default().with_wayland(), true)
             .build()
-            .expect("vordt-app: winit could not create an event loop");
+            .expect("varre-app: winit could not create an event loop");
 
         event_loop.set_control_flow(ControlFlow::Poll);
 

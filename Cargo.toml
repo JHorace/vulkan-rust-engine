@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
-members = [ "vordt-app","vordt-engine"]
+members = ["varre-app", "varre-engine", "varre-assets"]
 
 [workspace.dependencies]
-vordt-engine = {path = "vordt-engine"}
+varre-engine = {path = "varre-engine" }
+varre-assets = {path = "varre-assets" }

@@ -51,9 +51,9 @@ fn create_instance(
 ) -> Result<Instance, Box<dyn Error>> {
     //todo: app name, version, etc.4
     let application_info = vk::ApplicationInfo::default()
-        .application_name(c"vordt-engine")
+        .application_name(c"varre-engine")
         .application_version(0)
-        .engine_name(c"vordt-engine")
+        .engine_name(c"varre-engine")
         .engine_version(0)
         .api_version(vk::make_api_version(0, 1, 3, 0));
 
@@ -98,9 +98,7 @@ fn create_device(
     instance: &Instance,
     physical_device: vk::PhysicalDevice,
     queue_family_indices: QueueFamilyIndices,
-    enable_validation: bool,
     headless: bool,
-    loader: &Entry,
 ) -> Result<Device, Box<dyn Error>> {
     let mut queue_create_infos: Vec<vk::DeviceQueueCreateInfo> = vec![];
     let queue_priorities = [1.0];
@@ -128,28 +126,6 @@ fn create_device(
                 .queue_priorities(&queue_priorities),
         );
     }
-
-    enable_validation.then(|| {
-        let debug_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
-            .message_severity(
-                vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
-                    | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
-                    | vk::DebugUtilsMessageSeverityFlagsEXT::INFO,
-            )
-            .message_type(
-                vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
-                    | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
-                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
-            )
-            .pfn_user_callback(Some(vulkan_debug_callback));
-
-        let debug_utils_loader = debug_utils::Instance::new(loader, &instance);
-        let debug_callback = unsafe {
-            debug_utils_loader
-                .create_debug_utils_messenger(&debug_info, None)
-                .unwrap()
-        };
-    });
 
     let device_extension_names_raw: Vec<*const c_char> = [shader_object::NAME.as_ptr()]
         .into_iter()
@@ -181,6 +157,7 @@ pub struct VulkanEngine {
     surface_loader: surface::Instance,
     shader_object_loader: shader_object::Device,
     swapchain: Option<vulkan_swapchain::Swapchain>,
+    debug_utils: Option<(debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
 }
 
 impl VulkanEngine {
@@ -215,6 +192,29 @@ impl VulkanEngine {
             &queue_family_properties
         );
 
+        let debug_utils = enable_validation.then(|| {
+            let debug_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+                .message_severity(
+                    vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
+                        | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+                        | vk::DebugUtilsMessageSeverityFlagsEXT::INFO,
+                )
+                .message_type(
+                    vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                        | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                        | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+                )
+                .pfn_user_callback(Some(vulkan_debug_callback));
+
+            let debug_utils_loader = debug_utils::Instance::new(&entry, &instance);
+            let debug_callback = unsafe {
+                debug_utils_loader
+                    .create_debug_utils_messenger(&debug_info, None)
+                    .unwrap()
+            };
+
+            (debug_utils_loader, debug_callback)
+        });
 
         //Device creation could fail without a panic if the automatically selected physical device
         // is unsuitable, but a suitable device can be enumerated.
@@ -222,8 +222,7 @@ impl VulkanEngine {
             &instance,
             physical_device,
             queue_family_indices,
-            enable_validation,
-            &entry,
+            display_handle.is_none(),
         )?;
 
         let queue = unsafe {Device::get_device_queue(&device, queue_family_indices.graphics_general.unwrap(), 0)};
@@ -239,8 +238,7 @@ impl VulkanEngine {
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY);
 
-        let one_time_command_buffer = unsafe { device.allocate_command_buffers(&command_buffer_allocate_info)
-            .unwrap()[0] };
+        let one_time_command_buffer = unsafe { device.allocate_command_buffers(&command_buffer_allocate_info)?[0] };
 
         let shader_object_loader = shader_object::Device::new(&instance, &device);
 
@@ -255,6 +253,7 @@ impl VulkanEngine {
             surface_loader,
             shader_object_loader,
             swapchain: None,
+            debug_utils,
         })
     }
 
@@ -338,18 +337,30 @@ impl VulkanEngine {
     }
 }
 
+impl Drop for VulkanEngine {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.device_wait_idle().unwrap();
+            self.device.destroy_command_pool(self.command_pool, None);
+            self.device.destroy_device(None);
+            if let Some((ref debug_loader, debug_callback)) = self.debug_utils {
+                debug_loader.destroy_debug_utils_messenger(debug_callback, None);
+            }
+            self.instance.destroy_instance(None);
+        }
+    }
+}
 
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use winit::{event_loop::EventLoop, window::Window};
 
     #[test]
     fn test_create_instance() {
         let entry = unsafe { Entry::load().expect("failed to load vulkan module") };
 
-        create_instance(true, None, &entry).expect("Failed to create VordtEngine instance");
+        create_instance(true, None, &entry).expect("Failed to create VarreEngine instance");
     }
 
     #[test]
@@ -357,7 +368,7 @@ mod tests {
         let entry = unsafe { Entry::load().expect("failed to load vulkan module") };
 
         let instance =
-            create_instance(true, None, &entry).expect("Failed to create VordtEngine instance");
+            create_instance(true, None, &entry).expect("Failed to create VarreEngine instance");
 
         let physical_devices = unsafe {
             instance
@@ -373,17 +384,17 @@ mod tests {
             &queue_family_properties
         );
 
-        create_device(&instance, physical_device, queue_family_indices, Vec::new(), true, &entry).expect("Failed to create VordtEngine device");
+        create_device(&instance, physical_device, queue_family_indices, false).expect("Failed to create VarreEngine device");
     }
 
     #[test]
     fn test_create_engine() {
-        VulkanEngine::new(true, None).expect("Failed to create VordtEngine");
+        VulkanEngine::new(true, None).expect("Failed to create VarreEngine");
     }
 
     #[test]
     fn test_submit_command_buffer() {
-        let engine = VulkanEngine::new(true, None).expect("Failed to create VordtEngine");
+        let engine = VulkanEngine::new(true, None).expect("Failed to create VarreEngine");
         engine.record_and_submit_one_time_command_buffer(|_, _| {});
     }
 }
