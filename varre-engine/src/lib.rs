@@ -335,6 +335,15 @@ impl VulkanEngine {
                 .expect("failed to submit command buffer");
         }
     }
+
+    fn make_shader_objects(&self) {
+        // @TODO - For now we will use hardcoded paths and stage info, but we should be able to read
+        //         these from SPIR-V, and automatically make objects for every shader asset present.
+        
+        let vertex_shader_bytes: &[u8] = varre_assets::shaders::SHADER_TRIANGLE_VERTEX;
+        let shader_create_info = vk::ShaderCreateInfoEXT::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+    }
 }
 
 impl Drop for VulkanEngine {
