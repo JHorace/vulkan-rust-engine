@@ -1,16 +1,18 @@
-mod vulkan_swapchain;
-mod physical_device_utils;
 mod command_buffers;
+mod physical_device_utils;
+mod vulkan_swapchain;
 
 use ash::{
+    Device, Entry, Instance,
     ext::{debug_utils, shader_object},
     khr::{surface, swapchain},
-    vk, Device, Entry, Instance,
+    vk,
 };
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::borrow::Cow;
 use std::{error::Error, ffi, os::raw::c_char};
-
+use std::ffi::CStr;
+use std::mem::swap;
 use physical_device_utils::*;
 
 pub const NUM_FRAMES_IN_FLIGHT: usize = 3;
@@ -91,7 +93,6 @@ fn create_instance(
     }
 }
 
-
 //If display_window_handles is None, then we're in a headless state.
 //The engine should always be able to render to something, so it should always have a device.
 fn create_device(
@@ -132,17 +133,48 @@ fn create_device(
         .chain((!headless).then_some(swapchain::NAME.as_ptr()))
         .collect();
 
-    let mut shader_object_features = vk::PhysicalDeviceShaderObjectFeaturesEXT::default();
+    let mut shader_object_features = vk::PhysicalDeviceShaderObjectFeaturesEXT::default()
+        .shader_object(true);
+
+    let mut vulkan11_features = vk::PhysicalDeviceVulkan11Features::default()
+        .shader_draw_parameters(true);
+
+    let mut vulkan13_features = vk::PhysicalDeviceVulkan13Features::default()
+        .synchronization2(true)
+        .dynamic_rendering(true);
 
     let device_create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_create_infos)
         .enabled_extension_names(&device_extension_names_raw)
-        .push_next(&mut shader_object_features);
+        .push_next(&mut shader_object_features)
+        .push_next(&mut vulkan11_features)
+        .push_next(&mut vulkan13_features);
 
     unsafe {
         instance
             .create_device(physical_device, &device_create_info, None)
             .map_err(|e| e.into())
+    }
+}
+
+fn create_shader_object(
+    shader_object_loader: &shader_object::Device,
+    shader_code: &[u8],
+    stage: vk::ShaderStageFlags,
+    next_stage: vk::ShaderStageFlags,
+    entry_point: &CStr,
+) -> vk::ShaderEXT {
+    unsafe {
+        let shader_create_info = [vk::ShaderCreateInfoEXT::default()
+            .stage(stage)
+            .code_type(vk::ShaderCodeTypeEXT::SPIRV)
+            .code(shader_code)
+            .name(entry_point)
+            .next_stage(next_stage)];
+
+        shader_object_loader
+            .create_shaders(&shader_create_info, None)
+            .expect("failed to create shaders")[0]
     }
 }
 
@@ -153,10 +185,17 @@ pub struct VulkanEngine {
     device: Device,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
+    draw_command_buffers: [vk::CommandBuffer; 3],
+    draw_command_buffer_fences: [vk::Fence; 3],
     one_time_command_buffer: vk::CommandBuffer,
     surface_loader: surface::Instance,
     shader_object_loader: shader_object::Device,
     swapchain: Option<vulkan_swapchain::Swapchain>,
+    present_complete_semaphores: [vk::Semaphore; 3],
+    rendering_complete_semaphores: [vk::Semaphore; 3],
+    triangle_vert: vk::ShaderEXT,
+    triangle_frag: vk::ShaderEXT,
+    frame_index: usize,
     debug_utils: Option<(debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
 }
 
@@ -186,11 +225,10 @@ impl VulkanEngine {
         //Find the first physical device that is a discrete GPU
         let physical_device = select_physical_device(physical_devices, &instance);
 
-        let queue_family_properties = unsafe {instance.get_physical_device_queue_family_properties(physical_device)};
+        let queue_family_properties =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
 
-        let queue_family_indices = QueueFamilyIndices::new(
-            &queue_family_properties
-        );
+        let queue_family_indices = QueueFamilyIndices::new(&queue_family_properties);
 
         let debug_utils = enable_validation.then(|| {
             let debug_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
@@ -225,22 +263,74 @@ impl VulkanEngine {
             display_handle.is_none(),
         )?;
 
-        let queue = unsafe {Device::get_device_queue(&device, queue_family_indices.graphics_general.unwrap(), 0)};
+        let queue = unsafe {
+            Device::get_device_queue(&device, queue_family_indices.graphics_general.unwrap(), 0)
+        };
 
         let command_pool_create_info = vk::CommandPoolCreateInfo::default()
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
             .queue_family_index(queue_family_indices.graphics_general.unwrap());
 
-        let command_pool = unsafe {device.create_command_pool(&command_pool_create_info, None).expect("failed to create command pool")};
+        let command_pool = unsafe {
+            device
+                .create_command_pool(&command_pool_create_info, None)
+                .expect("failed to create command pool")
+        };
 
         let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
-            .command_buffer_count(1)
+            .command_buffer_count(4)
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY);
 
-        let one_time_command_buffer = unsafe { device.allocate_command_buffers(&command_buffer_allocate_info)?[0] };
+        let command_buffers =
+            unsafe { device.allocate_command_buffers(&command_buffer_allocate_info)? };
+
+        let fence_create_info =
+            vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+
+        let draw_command_buffer_fences = unsafe {
+            std::array::from_fn(|_| {
+                device
+                    .create_fence(&fence_create_info, None)
+                    .expect("failed to create fence")
+            })
+        };
+
+        let one_time_command_buffer = command_buffers[0];
+        let draw_command_buffers = command_buffers[1..][..3].try_into()?;
 
         let shader_object_loader = shader_object::Device::new(&instance, &device);
+
+        let triangle_vert = create_shader_object(
+            &shader_object_loader,
+            varre_assets::shaders::SHADER_TRIANGLE_VERTEX,
+            vk::ShaderStageFlags::VERTEX,
+            vk::ShaderStageFlags::FRAGMENT,
+            c"main"
+        );
+        let triangle_frag = create_shader_object(
+            &shader_object_loader,
+            varre_assets::shaders::SHADER_TRIANGLE_FRAGMENT,
+            vk::ShaderStageFlags::FRAGMENT,
+            vk::ShaderStageFlags::empty(),
+            c"main"
+        );
+
+        let present_complete_semaphores = unsafe {
+            std::array::from_fn(|_| {
+                device
+                    .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+                    .expect("failed to create semaphore")
+            })
+        };
+
+        let rendering_complete_semaphores = unsafe {
+            std::array::from_fn(|_| {
+                device
+                    .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+                    .expect("failed to create semaphore")
+            })
+        };
 
         Ok(VulkanEngine {
             entry,
@@ -249,77 +339,116 @@ impl VulkanEngine {
             device,
             queue,
             command_pool,
+            draw_command_buffers,
+            draw_command_buffer_fences,
             one_time_command_buffer,
             surface_loader,
             shader_object_loader,
+            triangle_vert,
+            triangle_frag,
             swapchain: None,
+            present_complete_semaphores,
+            rendering_complete_semaphores,
+            frame_index: 0,
             debug_utils,
         })
     }
 
-    pub fn add_window(&mut self, display_handle: RawDisplayHandle, window_handle: RawWindowHandle, window_width: u32, window_height: u32) {
-
-            let surface = unsafe {
-                ash_window::create_surface(&self.entry, &self.instance, display_handle, window_handle, None)
-                    .expect("failed to create surface")
-            };
-
-            let surface_format = unsafe {
-                self.surface_loader
-                    .get_physical_device_surface_formats(self.physical_device, surface)
-                    .unwrap()[0]
-            };
-
-            let surface_capabilities = unsafe {
-                self.surface_loader
-                    .get_physical_device_surface_capabilities(self.physical_device, surface)
-                    .unwrap()
-            };
-
-            let present_modes = unsafe {
-                self.surface_loader.get_physical_device_surface_present_modes(self.physical_device, surface)
-                    .unwrap()
-            };
-
-            let swapchain = vulkan_swapchain::Swapchain::new(
+    pub fn add_window(
+        &mut self,
+        display_handle: RawDisplayHandle,
+        window_handle: RawWindowHandle,
+        window_width: u32,
+        window_height: u32,
+    ) {
+        let surface = unsafe {
+            ash_window::create_surface(
+                &self.entry,
                 &self.instance,
-                &self.device,
-                surface,
-                vk::Extent2D { width: window_width, height: window_height },
-                surface_capabilities,
-                present_modes,
-                surface_format
-            );
+                display_handle,
+                window_handle,
+                None,
+            )
+            .expect("failed to create surface")
+        };
 
-            self.swapchain = Some(swapchain);
+        let surface_format = unsafe {
+            self.surface_loader
+                .get_physical_device_surface_formats(self.physical_device, surface)
+                .unwrap()[0]
+        };
+
+        let surface_capabilities = unsafe {
+            self.surface_loader
+                .get_physical_device_surface_capabilities(self.physical_device, surface)
+                .unwrap()
+        };
+
+        let present_modes = unsafe {
+            self.surface_loader
+                .get_physical_device_surface_present_modes(self.physical_device, surface)
+                .unwrap()
+        };
+
+        let swapchain = vulkan_swapchain::Swapchain::new(
+            &self.instance,
+            &self.device,
+            surface,
+            vk::Extent2D {
+                width: window_width,
+                height: window_height,
+            },
+            surface_capabilities,
+            present_modes,
+            surface_format,
+        );
+
+        self.swapchain = Some(swapchain);
     }
 
-    pub fn record_and_submit_one_time_command_buffer<F: FnOnce(&Device, vk::CommandBuffer)>(&self, f: F) {
+    pub fn record_and_submit_one_time_command_buffer<F: FnOnce(&Device, vk::CommandBuffer)>(
+        &self,
+        f: F,
+    ) {
         unsafe {
             self.record_command_buffer(self.one_time_command_buffer, f);
 
-            self.device.queue_wait_idle(self.queue).expect("failed to wait for queue idle");
+            self.device
+                .queue_wait_idle(self.queue)
+                .expect("failed to wait for queue idle");
 
             self.submit_command_buffer(self.one_time_command_buffer);
 
-            self.device.queue_wait_idle(self.queue).expect("failed to wait for queue idle");
+            self.device
+                .queue_wait_idle(self.queue)
+                .expect("failed to wait for queue idle");
         }
     }
 
-    pub fn record_command_buffer<F: FnOnce(&Device, vk::CommandBuffer)>(&self, command_buffer: vk::CommandBuffer, f: F) {
+    pub fn record_command_buffer<F: FnOnce(&Device, vk::CommandBuffer)>(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        f: F,
+    ) {
         unsafe {
-            self.device.reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::RELEASE_RESOURCES)
+            self.device
+                .reset_command_buffer(
+                    command_buffer,
+                    vk::CommandBufferResetFlags::RELEASE_RESOURCES,
+                )
                 .expect("failed to reset command buffer");
 
             let command_buffer_begin_info = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-            self.device.begin_command_buffer(command_buffer, &command_buffer_begin_info)
+            self.device
+                .begin_command_buffer(command_buffer, &command_buffer_begin_info)
                 .expect("failed to begin command buffer");
 
             f(&self.device, command_buffer);
 
-            self.device.end_command_buffer(command_buffer)
+            self.device
+                .end_command_buffer(command_buffer)
                 .expect("failed to end command buffer");
         }
     }
@@ -328,21 +457,60 @@ impl VulkanEngine {
         unsafe {
             let command_buffers = vec![command_buffer];
 
-            let submit_info = vk::SubmitInfo::default()
-                .command_buffers(&command_buffers);
+            let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
 
-            self.device.queue_submit(self.queue, &[submit_info], vk::Fence::null())
+            self.device
+                .queue_submit(self.queue, &[submit_info], vk::Fence::null())
                 .expect("failed to submit command buffer");
         }
     }
 
-    fn make_shader_objects(&self) {
-        // @TODO - For now we will use hardcoded paths and stage info, but we should be able to read
-        //         these from SPIR-V, and automatically make objects for every shader asset present.
-        
-        let vertex_shader_bytes: &[u8] = varre_assets::shaders::SHADER_TRIANGLE_VERTEX;
-        let shader_create_info = vk::ShaderCreateInfoEXT::default()
-            .stage(vk::ShaderStageFlags::VERTEX)
+    pub fn draw(& mut self) {
+        unsafe {
+            let draw_command_buffer = self.draw_command_buffers[self.frame_index];
+            let draw_command_buffer_fence = self.draw_command_buffer_fences[self.frame_index];
+            let present_complete_semaphore = self.present_complete_semaphores[self.frame_index];
+
+            self.device.wait_for_fences(&[draw_command_buffer_fence], true, u64::MAX).unwrap();
+            self.device.reset_fences(&[draw_command_buffer_fence]).unwrap();
+
+            let swapchain = self.swapchain.as_ref().unwrap();
+
+            let (present_index, _) = swapchain.loader.acquire_next_image(swapchain.vk_swapchain, u64::MAX, present_complete_semaphore, vk::Fence::null()).unwrap();
+
+            self.record_command_buffer(draw_command_buffer, |_, draw_command_buffer| {
+               self.record_draw(draw_command_buffer, swapchain.images[present_index as usize], swapchain.image_views[present_index as usize], vk::Rect2D::default().extent(swapchain.extent));
+            });
+
+            let rendering_complete_semaphore = self.rendering_complete_semaphores[present_index as usize];
+
+            let command_buffers = vec![draw_command_buffer];
+            let wait_semaphores = vec![present_complete_semaphore];
+            let signal_semaphores = vec![rendering_complete_semaphore];
+            let wait_stage_mask = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+
+            let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers)
+                .wait_semaphores(&wait_semaphores)
+                .signal_semaphores(&signal_semaphores)
+                .wait_dst_stage_mask(&wait_stage_mask);
+
+            self.device
+                .queue_submit(self.queue, &[submit_info], draw_command_buffer_fence)
+                .expect("failed to submit command buffer");
+
+            let swapchains = vec![swapchain.vk_swapchain];
+            let image_indices = vec![present_index];
+            let wait_semaphores = vec![rendering_complete_semaphore];
+
+            let present_info = vk::PresentInfoKHR::default()
+                .wait_semaphores(&wait_semaphores)
+                .swapchains(&swapchains)
+                .image_indices(&image_indices);
+
+            swapchain.loader.queue_present(self.queue, &present_info).unwrap();
+
+            self.frame_index = (self.frame_index + 1) % 3;
+        }
     }
 }
 
@@ -359,7 +527,6 @@ impl Drop for VulkanEngine {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -387,13 +554,13 @@ mod tests {
 
         let physical_device = select_physical_device(physical_devices, &instance);
 
-        let queue_family_properties = unsafe {instance.get_physical_device_queue_family_properties(physical_device)};
+        let queue_family_properties =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
 
-        let queue_family_indices = QueueFamilyIndices::new(
-            &queue_family_properties
-        );
+        let queue_family_indices = QueueFamilyIndices::new(&queue_family_properties);
 
-        create_device(&instance, physical_device, queue_family_indices, false).expect("Failed to create VarreEngine device");
+        create_device(&instance, physical_device, queue_family_indices, false)
+            .expect("Failed to create VarreEngine device");
     }
 
     #[test]

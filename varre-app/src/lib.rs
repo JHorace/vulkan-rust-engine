@@ -2,9 +2,7 @@ use std::cell::RefCell;
 use varre_engine::VulkanEngine;
 use winit::error::EventLoopError;
 use winit::platform::x11::EventLoopBuilderExtX11;
-use winit::raw_window_handle::{
-    HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
-};
+use winit::raw_window_handle::{HasDisplayHandle, HasRawDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 
 use winit::event_loop::{EventLoopProxy, EventLoopBuilder, ActiveEventLoop};
 
@@ -28,6 +26,11 @@ pub struct EngineApplication {
 
 impl ApplicationHandler for EngineApplication {
     fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
+        let window = event_loop.create_window(WindowAttributes::default()).expect("Failed to create window");
+        let display_handle = event_loop.display_handle().unwrap().as_raw();
+        let window_handle = window.window_handle().unwrap().as_raw();
+        self.engine = Some(VulkanEngine::new(true, Some(display_handle)).expect("Failed to create VulkanEngine"));
+        self.engine.as_mut().unwrap().add_window(display_handle, window_handle, window.surface_size().width, window.surface_size().height);
         self.window = Some(event_loop.create_window(WindowAttributes::default()).expect("Failed to create window"));
     }
 
@@ -42,6 +45,7 @@ impl ApplicationHandler for EngineApplication {
             }
             WindowEvent::RedrawRequested => {
                 self.window.as_ref().unwrap().request_redraw();
+                self.engine.as_mut().unwrap().draw();
             }
             _ => println!("Window event: {:?}", event),
         }

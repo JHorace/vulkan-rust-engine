@@ -30,7 +30,7 @@ impl VulkanEngine {
            self.device.cmd_pipeline_barrier2(cmd, &dependency_info);
        }
     }
-    fn record_draw(&self, cmd : vk::CommandBuffer, img : vk::Image, img_view : vk::ImageView, area : vk::Rect2D) {
+    pub(crate) fn record_draw(&self, cmd : vk::CommandBuffer, img : vk::Image, img_view : vk::ImageView, area : vk::Rect2D) {
         unsafe {
 
             // Transition color target to write
@@ -57,6 +57,10 @@ impl VulkanEngine {
 
             // Set render state
             {
+                let shaders = [self.triangle_vert, self.triangle_frag];
+                let stages = [vk::ShaderStageFlags::VERTEX, vk::ShaderStageFlags::FRAGMENT];
+                self.shader_object_loader.cmd_bind_shaders(cmd, &stages, &shaders);
+
                 // Setting viewport, scissor, and rasterizer discard is required before draw w/ shader object.
                 let viewport = [vk::Viewport::default().width(area.extent.width as f32).height(area.extent.height as f32)];
                 self.device.cmd_set_viewport_with_count(cmd, &viewport);
@@ -92,6 +96,7 @@ impl VulkanEngine {
 
             self.device.cmd_draw(cmd, 3, 1, 0, 0);
 
+            self.device.cmd_end_rendering(cmd);
             // Transition color target to don't care
             self.record_image_layout_transition(cmd, img, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR, vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::AccessFlags2::NONE, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT, vk::PipelineStageFlags2::BOTTOM_OF_PIPE);
         }

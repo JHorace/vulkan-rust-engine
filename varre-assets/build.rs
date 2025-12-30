@@ -137,7 +137,7 @@ fn generate_shader_module(out_dir: &str, out_shader_dir: &Path) {
             let rel_path = format!("shaders/{}", file_name);
 
             generated_code.push_str(&format!(
-                "    pub const {}: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{}\"));\n",
+                "    pub const {}: &[u8] = ::include_bytes_aligned::include_bytes_aligned!(4, concat!(env!(\"OUT_DIR\"), \"/{}\"));\n",
                 var_name, rel_path
             ));
         }

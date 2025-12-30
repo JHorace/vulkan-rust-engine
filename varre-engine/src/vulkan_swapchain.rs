@@ -8,10 +8,11 @@ use ash::{
 //for convenience. This does not require a second explicit lifetime as the lifetime of the instance
 //should exceed the device.
 pub struct Swapchain {
-    vk_swapchain: vk::SwapchainKHR,
-    loader: swapchain::Device,
-    images: Vec<vk::Image>,
-    image_views: Vec<vk::ImageView>,
+    pub vk_swapchain: vk::SwapchainKHR,
+    pub loader: swapchain::Device,
+    pub images: Vec<vk::Image>,
+    pub image_views: Vec<vk::ImageView>,
+    pub extent: vk::Extent2D,
 }
 
 impl Swapchain {
@@ -47,9 +48,17 @@ impl Swapchain {
             .find(|&mode| mode == vk::PresentModeKHR::MAILBOX)
             .unwrap_or(vk::PresentModeKHR::FIFO);
 
+        let mut desired_image_count = surface_capabilities.min_image_count + 1;
+
+        if(surface_capabilities.max_image_count > 0 &&
+        desired_image_count > surface_capabilities.max_image_count)
+        {
+            desired_image_count = surface_capabilities.max_image_count;
+        }
+
         let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface)
-            .min_image_count(surface_capabilities.min_image_count)
+            .min_image_count(desired_image_count)
             .image_format(format.format)
             .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
             .image_extent(surface_resolution)
@@ -106,6 +115,7 @@ impl Swapchain {
             loader: swapchain_loader,
             images: present_images,
             image_views: present_image_views,
+            extent: surface_resolution,
         }
     }
 }
