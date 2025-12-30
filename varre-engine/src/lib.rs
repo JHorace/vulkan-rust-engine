@@ -8,12 +8,13 @@ use ash::{
     khr::{surface, swapchain},
     vk,
 };
+use physical_device_utils::*;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::borrow::Cow;
-use std::{error::Error, ffi, os::raw::c_char};
 use std::ffi::CStr;
 use std::mem::swap;
-use physical_device_utils::*;
+use std::{error::Error, ffi, os::raw::c_char};
+use ash::vk::SurfaceKHR;
 
 pub const NUM_FRAMES_IN_FLIGHT: usize = 3;
 
@@ -133,11 +134,11 @@ fn create_device(
         .chain((!headless).then_some(swapchain::NAME.as_ptr()))
         .collect();
 
-    let mut shader_object_features = vk::PhysicalDeviceShaderObjectFeaturesEXT::default()
-        .shader_object(true);
+    let mut shader_object_features =
+        vk::PhysicalDeviceShaderObjectFeaturesEXT::default().shader_object(true);
 
-    let mut vulkan11_features = vk::PhysicalDeviceVulkan11Features::default()
-        .shader_draw_parameters(true);
+    let mut vulkan11_features =
+        vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
 
     let mut vulkan13_features = vk::PhysicalDeviceVulkan13Features::default()
         .synchronization2(true)
@@ -188,6 +189,7 @@ pub struct VulkanEngine {
     draw_command_buffers: [vk::CommandBuffer; 3],
     draw_command_buffer_fences: [vk::Fence; 3],
     one_time_command_buffer: vk::CommandBuffer,
+    surface: Option<SurfaceKHR>,
     surface_loader: surface::Instance,
     shader_object_loader: shader_object::Device,
     swapchain: Option<vulkan_swapchain::Swapchain>,
@@ -306,14 +308,14 @@ impl VulkanEngine {
             varre_assets::shaders::SHADER_TRIANGLE_VERTEX,
             vk::ShaderStageFlags::VERTEX,
             vk::ShaderStageFlags::FRAGMENT,
-            c"main"
+            c"main",
         );
         let triangle_frag = create_shader_object(
             &shader_object_loader,
             varre_assets::shaders::SHADER_TRIANGLE_FRAGMENT,
             vk::ShaderStageFlags::FRAGMENT,
             vk::ShaderStageFlags::empty(),
-            c"main"
+            c"main",
         );
 
         let present_complete_semaphores = unsafe {
@@ -342,6 +344,7 @@ impl VulkanEngine {
             draw_command_buffers,
             draw_command_buffer_fences,
             one_time_command_buffer,
+            surface: None,
             surface_loader,
             shader_object_loader,
             triangle_vert,
@@ -354,13 +357,8 @@ impl VulkanEngine {
         })
     }
 
-    pub fn add_window(
-        &mut self,
-        display_handle: RawDisplayHandle,
-        window_handle: RawWindowHandle,
-        window_width: u32,
-        window_height: u32,
-    ) {
+    pub fn add_window(&mut self, display_handle: RawDisplayHandle, window_handle: RawWindowHandle, window_width: u32, window_height: u32)
+    {
         let surface = unsafe {
             ash_window::create_surface(
                 &self.entry,
@@ -369,9 +367,14 @@ impl VulkanEngine {
                 window_handle,
                 None,
             )
-            .expect("failed to create surface")
+                .expect("failed to create surface")
         };
 
+        self.surface = Some(surface);
+        self.create_swapchain(surface, window_width, window_height);
+    }
+
+    pub fn create_swapchain(&mut self, surface: SurfaceKHR, window_width: u32, window_height: u32) {
         let surface_format = unsafe {
             self.surface_loader
                 .get_physical_device_surface_formats(self.physical_device, surface)
@@ -404,6 +407,21 @@ impl VulkanEngine {
         );
 
         self.swapchain = Some(swapchain);
+    }
+
+    pub fn recreate_swapchain(
+        &mut self,
+        window_width: u32,
+        window_height: u32,
+    ) {
+     unsafe {
+         self.device.device_wait_idle().unwrap();
+         for view in self.swapchain.as_mut().unwrap().image_views.iter() {
+             self.device.destroy_image_view(*view, None);
+         }
+         self.swapchain = None;
+         self.create_swapchain(self.surface.unwrap(), window_width, window_height);
+     }
     }
 
     pub fn record_and_submit_one_time_command_buffer<F: FnOnce(&Device, vk::CommandBuffer)>(
@@ -465,31 +483,54 @@ impl VulkanEngine {
         }
     }
 
-    pub fn draw(& mut self) {
+    pub fn draw(&mut self) {
         unsafe {
             let draw_command_buffer = self.draw_command_buffers[self.frame_index];
             let draw_command_buffer_fence = self.draw_command_buffer_fences[self.frame_index];
             let present_complete_semaphore = self.present_complete_semaphores[self.frame_index];
 
-            self.device.wait_for_fences(&[draw_command_buffer_fence], true, u64::MAX).unwrap();
-            self.device.reset_fences(&[draw_command_buffer_fence]).unwrap();
+            self.device
+                .wait_for_fences(&[draw_command_buffer_fence], true, u64::MAX)
+                .unwrap();
+            self.device
+                .reset_fences(&[draw_command_buffer_fence])
+                .unwrap();
 
             let swapchain = self.swapchain.as_ref().unwrap();
 
-            let (present_index, _) = swapchain.loader.acquire_next_image(swapchain.vk_swapchain, u64::MAX, present_complete_semaphore, vk::Fence::null()).unwrap();
+            let (present_index, suboptimal) = swapchain
+                .loader
+                .acquire_next_image(
+                    swapchain.vk_swapchain,
+                    u64::MAX,
+                    present_complete_semaphore,
+                    vk::Fence::null(),
+                )
+                .unwrap();
+
+            if suboptimal {
+                println!("suboptimal swapchain image acquired");
+            }
 
             self.record_command_buffer(draw_command_buffer, |_, draw_command_buffer| {
-               self.record_draw(draw_command_buffer, swapchain.images[present_index as usize], swapchain.image_views[present_index as usize], vk::Rect2D::default().extent(swapchain.extent));
+                self.record_draw(
+                    draw_command_buffer,
+                    swapchain.images[present_index as usize],
+                    swapchain.image_views[present_index as usize],
+                    vk::Rect2D::default().extent(swapchain.extent),
+                );
             });
 
-            let rendering_complete_semaphore = self.rendering_complete_semaphores[present_index as usize];
+            let rendering_complete_semaphore =
+                self.rendering_complete_semaphores[present_index as usize];
 
             let command_buffers = vec![draw_command_buffer];
             let wait_semaphores = vec![present_complete_semaphore];
             let signal_semaphores = vec![rendering_complete_semaphore];
             let wait_stage_mask = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
 
-            let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers)
+            let submit_info = vk::SubmitInfo::default()
+                .command_buffers(&command_buffers)
                 .wait_semaphores(&wait_semaphores)
                 .signal_semaphores(&signal_semaphores)
                 .wait_dst_stage_mask(&wait_stage_mask);
@@ -507,7 +548,10 @@ impl VulkanEngine {
                 .swapchains(&swapchains)
                 .image_indices(&image_indices);
 
-            swapchain.loader.queue_present(self.queue, &present_info).unwrap();
+            swapchain
+                .loader
+                .queue_present(self.queue, &present_info)
+                .unwrap();
 
             self.frame_index = (self.frame_index + 1) % 3;
         }
@@ -518,11 +562,47 @@ impl Drop for VulkanEngine {
     fn drop(&mut self) {
         unsafe {
             self.device.device_wait_idle().unwrap();
+            
+            // Destroy swapchain and related resources
+            if let Some(swapchain) = self.swapchain.take() {
+                for view in swapchain.image_views.iter() {
+                    self.device.destroy_image_view(*view, None);
+                }
+                drop(swapchain); // This calls Swapchain::drop which destroys vk_swapchain
+            }
+            
+            // Destroy synchronization primitives
+            for semaphore in self.present_complete_semaphores {
+                self.device.destroy_semaphore(semaphore, None);
+            }
+            for semaphore in self.rendering_complete_semaphores {
+                self.device.destroy_semaphore(semaphore, None);
+            }
+            for fence in self.draw_command_buffer_fences {
+                self.device.destroy_fence(fence, None);
+            }
+            
+            // Destroy shader objects
+            self.shader_object_loader.destroy_shader(self.triangle_vert, None);
+            self.shader_object_loader.destroy_shader(self.triangle_frag, None);
+            
+            // Destroy command pool (this also frees command buffers)
             self.device.destroy_command_pool(self.command_pool, None);
+            
+            // Destroy device
             self.device.destroy_device(None);
+            
+            // Destroy surface
+            if let Some(surface) = self.surface {
+                self.surface_loader.destroy_surface(surface, None);
+            }
+            
+            // Destroy debug utils
             if let Some((ref debug_loader, debug_callback)) = self.debug_utils {
                 debug_loader.destroy_debug_utils_messenger(debug_callback, None);
             }
+            
+            // Destroy instance
             self.instance.destroy_instance(None);
         }
     }

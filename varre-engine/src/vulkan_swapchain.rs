@@ -118,4 +118,13 @@ impl Swapchain {
             extent: surface_resolution,
         }
     }
+
+}
+
+impl Drop for Swapchain {
+    fn drop(&mut self) {
+        unsafe {
+            self.loader.destroy_swapchain(self.vk_swapchain, None)
+        };
+    }
 }

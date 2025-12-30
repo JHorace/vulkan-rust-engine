@@ -4,4 +4,5 @@ members = ["varre-app", "varre-engine", "varre-assets"]
 
 [workspace.dependencies]
 varre-engine = {path = "varre-engine" }
+varre-app = {path = "varre-app"}
 varre-assets = {path = "varre-assets" }
