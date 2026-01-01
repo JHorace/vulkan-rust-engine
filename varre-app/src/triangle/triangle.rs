@@ -1,5 +1,5 @@
 use winit::event::WindowEvent;
-use winit::event_loop::{EventLoop, EventLoopBuilder};
+use winit::event_loop::{EventLoopBuilder};
 use winit::platform::wayland::EventLoopBuilderExtWayland;
 use varre_app::*;
 use varre_engine::VulkanEngine;
@@ -12,9 +12,6 @@ impl VarreApplicationImpl for TriangleApp {
             WindowEvent::RedrawRequested => {
                 engine.draw();
                 return true;
-            },
-            WindowEvent::SurfaceResized(size) => {
-                return false;
             },
             _ => false,
         }

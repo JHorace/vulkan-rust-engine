@@ -11,5 +11,5 @@ glam = "0.30.9"
 [build-dependencies]
 regex = "1.12.2"
 include_bytes_aligned = "0.2.0"
-russimp = "3.2.1"
+russimp = { version = "3.2.1" , features = ["prebuilt"]}
 glam = "0.30.9"
