@@ -193,8 +193,14 @@ fn process_models(out_dir: &str) {
 
     // Read the template file
     let template_path = Path::new("models_template.rs");
-    let mut models_code = fs::read_to_string(template_path)
+    let template = fs::read_to_string(template_path)
         .expect("Failed to read models_template.rs");
+
+    // Split the template at the placeholder comment
+    let (prefix, _) = template.split_once("    // Model constants will be generated here by build.rs")
+        .expect("Template missing placeholder comment");
+
+    let mut models_code = String::from(prefix);
 
     for model_path in obj_files {
         let file_name = model_path.file_name().unwrap().to_str().unwrap();
@@ -290,6 +296,7 @@ fn process_models(out_dir: &str) {
                  file_name, mesh.vertices.len(), indices.len(), bin_path.metadata().unwrap().len());
     }
 
+    // Close the models module
     models_code.push_str("}\n");
 
     let dest_path = Path::new(out_dir).join("models.rs");

@@ -67,3 +67,5 @@ impl Model {
 }
 
 pub mod models {
+    // Model constants will be generated here by build.rs
+}

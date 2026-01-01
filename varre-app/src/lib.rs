@@ -98,11 +98,7 @@ impl ApplicationHandler for VarreApplicationCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform::x11;
-    use varre_engine::VulkanEngine;
-    use winit::event::WindowEvent::CloseRequested;
-    use winit::event_loop::ControlFlow;
-    use winit::platform;
+    use winit::event_loop::{ControlFlow, EventLoopBuilder};
     use winit::platform::wayland::EventLoopBuilderExtWayland;
     use winit::platform::x11::EventLoopBuilderExtX11;
 
