@@ -8,9 +8,9 @@ struct TriangleApp;
 
 impl VarreApplicationImpl for TriangleApp {
     fn on_window_event(&mut self, event: &WindowEvent, engine: &mut VulkanEngine) -> bool {
-        engine.draw();
         match event {
             WindowEvent::RedrawRequested => {
+                engine.draw();
                 return true;
             },
             WindowEvent::SurfaceResized(size) => {

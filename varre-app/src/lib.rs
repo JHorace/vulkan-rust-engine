@@ -1,14 +1,22 @@
-use std::cell::RefCell;
 use varre_engine::VulkanEngine;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
-use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopBuilder};
-
 use winit::{
-    application::ApplicationHandler, event::WindowEvent, window::Window, window::WindowAttributes,
-    window::WindowId,
+    event_loop::ActiveEventLoop,
+    application::ApplicationHandler,
+    event::WindowEvent,
+    window::{Window, WindowAttributes, WindowId},
 };
 
+// @NOTE The relationship between VarreApplicationCore, VarreApplicationImpl, and the winit event loop
+//       is confusing, and their design is driven by my inexperience with rust and winit. I'll document
+//       the design decisions and limitations in the comments here:
+//       - The overall goal is to create a base class that implements window event handling behavior that is shared between
+//         all applications. This includes creating the initial window, adding it to the VulkanEngine, and notifying the engine
+//         if the window is resized. Other apps then don't need to reimplement this behavior, but can define custom event handling
+//         such as additional keyboard input responses.
+//       - EventLoop::run_app moves its ApplicationHandler argument, so a struct that implements ApplicationHandler
+//         cannot create its own event loop.
 pub trait VarreApplicationImpl {
 
     fn on_window_event(&mut self, event: &WindowEvent, engine: &mut VulkanEngine) -> bool {
@@ -73,7 +81,7 @@ impl ApplicationHandler for VarreApplicationCore {
                     event_loop.exit();
                 }
                 WindowEvent::RedrawRequested => {
-                    self.window.as_ref().unwrap().request_redraw();
+                    //self.window.as_ref().unwrap().request_redraw();
                 }
                 WindowEvent::SurfaceResized(size) => {
                     self.engine.as_mut().unwrap().recreate_swapchain(
