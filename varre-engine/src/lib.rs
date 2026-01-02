@@ -1,6 +1,7 @@
 mod command_buffers;
 mod physical_device_utils;
 mod vulkan_swapchain;
+mod shader_utils;
 
 use ash::{
     Device, Entry, Instance,
@@ -12,7 +13,6 @@ use physical_device_utils::*;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::borrow::Cow;
 use std::ffi::CStr;
-use std::mem::swap;
 use std::{error::Error, ffi, os::raw::c_char};
 use ash::vk::SurfaceKHR;
 
@@ -158,26 +158,6 @@ fn create_device(
     }
 }
 
-fn create_shader_object(
-    shader_object_loader: &shader_object::Device,
-    shader_code: &[u8],
-    stage: vk::ShaderStageFlags,
-    next_stage: vk::ShaderStageFlags,
-    entry_point: &CStr,
-) -> vk::ShaderEXT {
-    unsafe {
-        let shader_create_info = [vk::ShaderCreateInfoEXT::default()
-            .stage(stage)
-            .code_type(vk::ShaderCodeTypeEXT::SPIRV)
-            .code(shader_code)
-            .name(entry_point)
-            .next_stage(next_stage)];
-
-        shader_object_loader
-            .create_shaders(&shader_create_info, None)
-            .expect("failed to create shaders")[0]
-    }
-}
 
 pub struct VulkanEngine {
     entry: Entry,
@@ -185,18 +165,22 @@ pub struct VulkanEngine {
     physical_device: vk::PhysicalDevice,
     device: Device,
     queue: vk::Queue,
+    
     command_pool: vk::CommandPool,
     draw_command_buffers: [vk::CommandBuffer; 3],
     draw_command_buffer_fences: [vk::Fence; 3],
     one_time_command_buffer: vk::CommandBuffer,
+    
     surface: Option<SurfaceKHR>,
     surface_loader: surface::Instance,
+
     shader_object_loader: shader_object::Device,
+    shader_manager: shader_utils::ShaderManager,
+
     swapchain: Option<vulkan_swapchain::Swapchain>,
     present_complete_semaphores: [vk::Semaphore; 3],
     rendering_complete_semaphores: [vk::Semaphore; 3],
-    triangle_vert: vk::ShaderEXT,
-    triangle_frag: vk::ShaderEXT,
+
     frame_index: usize,
     debug_utils: Option<(debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
 }
@@ -303,20 +287,11 @@ impl VulkanEngine {
 
         let shader_object_loader = shader_object::Device::new(&instance, &device);
 
-        let triangle_vert = create_shader_object(
-            &shader_object_loader,
-            varre_assets::shaders::SHADER_TRIANGLE_VERTEX,
-            vk::ShaderStageFlags::VERTEX,
-            vk::ShaderStageFlags::FRAGMENT,
-            c"main",
+        // Create shader manager and load all shaders
+        let mut shader_manager = shader_utils::ShaderManager::new(
+            shader_object::Device::new(&instance, &device)
         );
-        let triangle_frag = create_shader_object(
-            &shader_object_loader,
-            varre_assets::shaders::SHADER_TRIANGLE_FRAGMENT,
-            vk::ShaderStageFlags::FRAGMENT,
-            vk::ShaderStageFlags::empty(),
-            c"main",
-        );
+        shader_manager.load_shaders();
 
         let present_complete_semaphores = unsafe {
             std::array::from_fn(|_| {
@@ -347,8 +322,7 @@ impl VulkanEngine {
             surface: None,
             surface_loader,
             shader_object_loader,
-            triangle_vert,
-            triangle_frag,
+            shader_manager,
             swapchain: None,
             present_complete_semaphores,
             rendering_complete_semaphores,
@@ -583,8 +557,7 @@ impl Drop for VulkanEngine {
             }
             
             // Destroy shader objects
-            self.shader_object_loader.destroy_shader(self.triangle_vert, None);
-            self.shader_object_loader.destroy_shader(self.triangle_frag, None);
+            // Shaders are automatically destroyed by ShaderManager's Drop implementation
             
             // Destroy command pool (this also frees command buffers)
             self.device.destroy_command_pool(self.command_pool, None);

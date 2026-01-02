@@ -3,25 +3,22 @@
 
 use glam::Vec3;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ModelID {
+    // ModelID variants will be generated here by build.rs
+}
+
 #[derive(Debug, Clone)]
 pub struct Model {
+    pub id: ModelID,
     pub verts: Vec<Vec3>,
     pub indices: Vec<u32>,
     pub uvs: Vec<f32>,
 }
 
 impl Model {
-    /// Load a model from binary data generated at build time
-    pub const fn from_bytes(data: &'static [u8]) -> Self {
-        Self {
-            verts: Vec::new(),
-            indices: Vec::new(),
-            uvs: Vec::new(),
-        }
-    }
-
     /// Decode binary model data into runtime structures
-    pub fn decode(data: &[u8]) -> Self {
+    pub fn decode(id: ModelID, data: &[u8]) -> Self {
         let mut offset = 0;
 
         // Read vertex count (u32)
@@ -62,7 +59,7 @@ impl Model {
             offset += 4;
         }
 
-        Self { verts, indices, uvs }
+        Self { id, verts, indices, uvs }
     }
 }
 

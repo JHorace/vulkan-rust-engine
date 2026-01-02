@@ -57,7 +57,12 @@ impl VulkanEngine {
 
             // Set render state
             {
-                let shaders = [self.triangle_vert, self.triangle_frag];
+                let triangle_vert = self.shader_manager.get_shader(varre_assets::ShaderID::SHADER_TRIANGLE_VERTEX)
+                    .expect("Triangle vertex shader not found");
+                let triangle_frag = self.shader_manager.get_shader(varre_assets::ShaderID::SHADER_TRIANGLE_FRAGMENT)
+                    .expect("Triangle fragment shader not found");
+
+                let shaders = [*triangle_vert, *triangle_frag];
                 let stages = [vk::ShaderStageFlags::VERTEX, vk::ShaderStageFlags::FRAGMENT];
                 self.shader_object_loader.cmd_bind_shaders(cmd, &stages, &shaders);
 

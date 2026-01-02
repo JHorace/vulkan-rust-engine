@@ -3,4 +3,4 @@
 // pub const VERTEX_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shaders/shader.vert.spv"));
 
 include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
-//include!(concat!(env!("OUT_DIR"), "/models.rs"));
+include!(concat!(env!("OUT_DIR"), "/models.rs"));
