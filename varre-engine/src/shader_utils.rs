@@ -1,8 +1,6 @@
-use std::collections::HashMap;
 use ash::vk;
 use ash::ext::shader_object;
 use std::ffi::CStr;
-use varre_assets::{Shader, ShaderID};
 
 // Helper trait for converting ShaderStage to Vulkan flags
 pub trait ToVkShaderStage {
@@ -33,73 +31,17 @@ pub struct VulkanShader {
 impl VulkanShader {
     /// Create a VulkanShader from a varre_assets::Shader
     pub fn from_shader(
-        shader_object_loader: &shader_object::Device,
+        device_context: &crate::DeviceContext,
         shader: &varre_assets::Shader,
     ) -> Self {
+        let shader_object_loader = device_context.shader_object_loader.as_ref()
+            .expect("shader_object_loader not available");
         let stage = shader.stage.to_vk();
         let shader_ext = create_shader_object(shader_object_loader, shader);
 
         Self {
             stage,
             shader: shader_ext,
-        }
-    }
-}
-
-pub struct ShaderManager {
-    shaders: HashMap<ShaderID, vk::ShaderEXT>,
-    shader_object_loader: shader_object::Device,
-}
-
-impl ShaderManager {
-
-    pub fn new(shader_object_loader: shader_object::Device) -> Self {
-        ShaderManager { shaders: HashMap::new(), shader_object_loader }
-    }
-
-    /// Load all shaders from varre-assets into the shader manager
-    pub fn load_shaders(&mut self) {
-        for shader_id in ShaderID::all() {
-            let shader = shader_id.shader();
-            self.add_shader(shader);
-        }
-    }
-
-    pub fn add_shader(&mut self, shader: &varre_assets::Shader)
-    {
-        let vulkan_shader = VulkanShader::from_shader(&self.shader_object_loader,
-                                                      shader);
-        self.shaders.insert(shader.id, vulkan_shader.shader);
-    }
-
-    /// Get a shader by its ID
-    pub fn get_shader(&self, id: ShaderID) -> Option<&vk::ShaderEXT> {
-        self.shaders.get(&id)
-    }
-
-    /// Get a mutable reference to a shader by its ID
-    pub fn get_shader_mut(&mut self, id: ShaderID) -> Option<&mut vk::ShaderEXT> {
-        self.shaders.get_mut(&id)
-    }
-
-    /// Get a reference to all shaders
-    pub fn shaders(&self) -> &HashMap<ShaderID, vk::ShaderEXT> {
-        &self.shaders
-    }
-
-    /// Get a mutable reference to all shaders
-    pub fn shaders_mut(&mut self) -> &mut HashMap<ShaderID, vk::ShaderEXT> {
-        &mut self.shaders
-    }
-}
-
-impl Drop for ShaderManager {
-    fn drop(&mut self) {
-        unsafe {
-            // Destroy all shader objects
-            for (_id, shader) in self.shaders.drain() {
-                self.shader_object_loader.destroy_shader(shader, None);
-            }
         }
     }
 }

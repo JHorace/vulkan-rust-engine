@@ -17,16 +17,15 @@ pub struct Swapchain {
 
 impl Swapchain {
     pub fn new(
-        instance: &ash::Instance,
-        device:   &ash::Device,
+        device_context: &crate::DeviceContext,
         surface: vk::SurfaceKHR,
         window_size: vk::Extent2D,
         surface_capabilities: vk::SurfaceCapabilitiesKHR,
         present_modes: Vec<vk::PresentModeKHR>,
         format: vk::SurfaceFormatKHR,
     ) -> Self {
-        // Load swapchain functions
-        let swapchain_loader = swapchain::Device::new(&instance, &device);
+        // Use swapchain loader from device context
+        let swapchain_loader = &device_context.swapchain_loader;
 
     let surface_resolution = match surface_capabilities.current_extent.width {
         u32::MAX => window_size,
@@ -105,14 +104,14 @@ impl Swapchain {
                             layer_count: 1,
                         })
                         .image(image);
-                    device.create_image_view(&create_view_info, None).unwrap()
+                    device_context.device.create_image_view(&create_view_info, None).unwrap()
                 })
                 .collect()
         };
 
         Swapchain {
             vk_swapchain: swapchain,
-            loader: swapchain_loader,
+            loader: device_context.swapchain_loader.clone(),
             images: present_images,
             image_views: present_image_views,
             extent: surface_resolution,

@@ -2,6 +2,8 @@ mod command_buffers;
 mod physical_device_utils;
 mod vulkan_swapchain;
 mod shader_utils;
+mod mesh_utils;
+mod memory_utils;
 
 use ash::{
     Device, Entry, Instance,
@@ -12,9 +14,11 @@ use ash::{
 use physical_device_utils::*;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::ffi::CStr;
 use std::{error::Error, ffi, os::raw::c_char};
 use ash::vk::SurfaceKHR;
+use varre_assets::ShaderID;
 
 pub const NUM_FRAMES_IN_FLIGHT: usize = 3;
 
@@ -158,24 +162,31 @@ fn create_device(
     }
 }
 
+// @NOTE I could consider adding bindings to extension functions in the impl for DeviceContext and
+//       making its handles private. This seems autogen-able, but potentially fraught with errors.
+pub struct DeviceContext {
+    pub entry: Entry,
+    pub instance: Instance,
+    pub physical_device: vk::PhysicalDevice,
+    pub device: Device,
+    pub surface_loader: surface::Instance,
+    pub swapchain_loader: swapchain::Device,
+    pub shader_object_loader: Option<shader_object::Device>,
+}
+
+
 
 pub struct VulkanEngine {
-    entry: Entry,
-    instance: Instance,
-    physical_device: vk::PhysicalDevice,
-    device: Device,
+    device_context: DeviceContext,
     queue: vk::Queue,
-    
+
     command_pool: vk::CommandPool,
     draw_command_buffers: [vk::CommandBuffer; 3],
     draw_command_buffer_fences: [vk::Fence; 3],
     one_time_command_buffer: vk::CommandBuffer,
-    
-    surface: Option<SurfaceKHR>,
-    surface_loader: surface::Instance,
 
-    shader_object_loader: shader_object::Device,
-    shader_manager: shader_utils::ShaderManager,
+    surface: Option<SurfaceKHR>,
+    shaders: HashMap<ShaderID, vk::ShaderEXT>,
 
     swapchain: Option<vulkan_swapchain::Swapchain>,
     present_complete_semaphores: [vk::Semaphore; 3],
@@ -197,9 +208,6 @@ impl VulkanEngine {
         //TODO: should we panic if this fails? Depends on whether there is anything the engine or the
         //      user can do to fix instance creation (update paths to missing layers, etc.)
         let instance = create_instance(enable_validation, display_handle, &entry)?;
-
-        //We'll load surface functions regardless of whether we have a surface or not.
-        let surface_loader = surface::Instance::new(&entry, &instance);
 
         //Get the list of available physical devices
         let physical_devices = unsafe {
@@ -249,8 +257,23 @@ impl VulkanEngine {
             display_handle.is_none(),
         )?;
 
+        // Create DeviceContext
+        let surface_loader = surface::Instance::new(&entry, &instance);
+        let swapchain_loader = swapchain::Device::new(&instance, &device);
+        let shader_object_loader = Some(shader_object::Device::new(&instance, &device));
+
+        let device_context = DeviceContext {
+            entry,
+            instance,
+            physical_device,
+            device,
+            surface_loader,
+            swapchain_loader,
+            shader_object_loader,
+        };
+
         let queue = unsafe {
-            Device::get_device_queue(&device, queue_family_indices.graphics_general.unwrap(), 0)
+            Device::get_device_queue(&device_context.device, queue_family_indices.graphics_general.unwrap(), 0)
         };
 
         let command_pool_create_info = vk::CommandPoolCreateInfo::default()
@@ -258,7 +281,7 @@ impl VulkanEngine {
             .queue_family_index(queue_family_indices.graphics_general.unwrap());
 
         let command_pool = unsafe {
-            device
+            device_context.device
                 .create_command_pool(&command_pool_create_info, None)
                 .expect("failed to create command pool")
         };
@@ -269,14 +292,14 @@ impl VulkanEngine {
             .level(vk::CommandBufferLevel::PRIMARY);
 
         let command_buffers =
-            unsafe { device.allocate_command_buffers(&command_buffer_allocate_info)? };
+            unsafe { device_context.device.allocate_command_buffers(&command_buffer_allocate_info)? };
 
         let fence_create_info =
             vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
 
         let draw_command_buffer_fences = unsafe {
             std::array::from_fn(|_| {
-                device
+                device_context.device
                     .create_fence(&fence_create_info, None)
                     .expect("failed to create fence")
             })
@@ -285,17 +308,19 @@ impl VulkanEngine {
         let one_time_command_buffer = command_buffers[0];
         let draw_command_buffers = command_buffers[1..][..3].try_into()?;
 
-        let shader_object_loader = shader_object::Device::new(&instance, &device);
-
-        // Create shader manager and load all shaders
-        let mut shader_manager = shader_utils::ShaderManager::new(
-            shader_object::Device::new(&instance, &device)
-        );
-        shader_manager.load_shaders();
+        // Load all shaders
+        let shader_object_loader = device_context.shader_object_loader.as_ref()
+            .expect("shader_object_loader not available");
+        let mut shaders = HashMap::new();
+        for shader_id in ShaderID::all() {
+            let shader = shader_id.shader();
+            let shader_ext = shader_utils::create_shader_object(shader_object_loader, shader);
+            shaders.insert(shader.id, shader_ext);
+        }
 
         let present_complete_semaphores = unsafe {
             std::array::from_fn(|_| {
-                device
+                device_context.device
                     .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
                     .expect("failed to create semaphore")
             })
@@ -303,26 +328,21 @@ impl VulkanEngine {
 
         let rendering_complete_semaphores = unsafe {
             std::array::from_fn(|_| {
-                device
+                device_context.device
                     .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
                     .expect("failed to create semaphore")
             })
         };
 
         Ok(VulkanEngine {
-            entry,
-            instance,
-            physical_device,
-            device,
+            device_context,
             queue,
             command_pool,
             draw_command_buffers,
             draw_command_buffer_fences,
             one_time_command_buffer,
             surface: None,
-            surface_loader,
-            shader_object_loader,
-            shader_manager,
+            shaders,
             swapchain: None,
             present_complete_semaphores,
             rendering_complete_semaphores,
@@ -335,8 +355,8 @@ impl VulkanEngine {
     {
         let surface = unsafe {
             ash_window::create_surface(
-                &self.entry,
-                &self.instance,
+                &self.device_context.entry,
+                &self.device_context.instance,
                 display_handle,
                 window_handle,
                 None,
@@ -350,26 +370,25 @@ impl VulkanEngine {
 
     pub fn create_swapchain(&mut self, surface: SurfaceKHR, window_width: u32, window_height: u32) {
         let surface_format = unsafe {
-            self.surface_loader
-                .get_physical_device_surface_formats(self.physical_device, surface)
+            self.device_context.surface_loader
+                .get_physical_device_surface_formats(self.device_context.physical_device, surface)
                 .unwrap()[0]
         };
 
         let surface_capabilities = unsafe {
-            self.surface_loader
-                .get_physical_device_surface_capabilities(self.physical_device, surface)
+            self.device_context.surface_loader
+                .get_physical_device_surface_capabilities(self.device_context.physical_device, surface)
                 .unwrap()
         };
 
         let present_modes = unsafe {
-            self.surface_loader
-                .get_physical_device_surface_present_modes(self.physical_device, surface)
+            self.device_context.surface_loader
+                .get_physical_device_surface_present_modes(self.device_context.physical_device, surface)
                 .unwrap()
         };
 
         let swapchain = vulkan_swapchain::Swapchain::new(
-            &self.instance,
-            &self.device,
+            &self.device_context,
             surface,
             vk::Extent2D {
                 width: window_width,
@@ -389,41 +408,42 @@ impl VulkanEngine {
         window_height: u32,
     ) {
      unsafe {
-         self.device.device_wait_idle().unwrap();
+         self.device_context.device.device_wait_idle().unwrap();
          for view in self.swapchain.as_mut().unwrap().image_views.iter() {
-             self.device.destroy_image_view(*view, None);
+             self.device_context.device.destroy_image_view(*view, None);
          }
+         self.device_context.swapchain_loader.destroy_swapchain(self.swapchain.as_ref().unwrap().vk_swapchain, None);
          self.swapchain = None;
          self.create_swapchain(self.surface.unwrap(), window_width, window_height);
      }
     }
 
-    pub fn record_and_submit_one_time_command_buffer<F: FnOnce(&Device, vk::CommandBuffer)>(
+    pub fn record_and_submit_one_time_command_buffer<F: FnOnce(&DeviceContext, vk::CommandBuffer)>(
         &self,
         f: F,
     ) {
         unsafe {
             self.record_command_buffer(self.one_time_command_buffer, f);
 
-            self.device
+            self.device_context.device
                 .queue_wait_idle(self.queue)
                 .expect("failed to wait for queue idle");
 
             self.submit_command_buffer(self.one_time_command_buffer);
 
-            self.device
+            self.device_context.device
                 .queue_wait_idle(self.queue)
                 .expect("failed to wait for queue idle");
         }
     }
 
-    pub fn record_command_buffer<F: FnOnce(&Device, vk::CommandBuffer)>(
+    pub fn record_command_buffer<F: FnOnce(&DeviceContext, vk::CommandBuffer)>(
         &self,
         command_buffer: vk::CommandBuffer,
         f: F,
     ) {
         unsafe {
-            self.device
+            self.device_context.device
                 .reset_command_buffer(
                     command_buffer,
                     vk::CommandBufferResetFlags::RELEASE_RESOURCES,
@@ -433,13 +453,13 @@ impl VulkanEngine {
             let command_buffer_begin_info = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-            self.device
+            self.device_context.device
                 .begin_command_buffer(command_buffer, &command_buffer_begin_info)
                 .expect("failed to begin command buffer");
 
-            f(&self.device, command_buffer);
+            f(&self.device_context, command_buffer);
 
-            self.device
+            self.device_context.device
                 .end_command_buffer(command_buffer)
                 .expect("failed to end command buffer");
         }
@@ -451,7 +471,7 @@ impl VulkanEngine {
 
             let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
 
-            self.device
+            self.device_context.device
                 .queue_submit(self.queue, &[submit_info], vk::Fence::null())
                 .expect("failed to submit command buffer");
         }
@@ -463,17 +483,16 @@ impl VulkanEngine {
             let draw_command_buffer_fence = self.draw_command_buffer_fences[self.frame_index];
             let present_complete_semaphore = self.present_complete_semaphores[self.frame_index];
 
-            self.device
+            self.device_context.device
                 .wait_for_fences(&[draw_command_buffer_fence], true, u64::MAX)
                 .unwrap();
-            self.device
+            self.device_context.device
                 .reset_fences(&[draw_command_buffer_fence])
                 .unwrap();
 
             let swapchain = self.swapchain.as_ref().unwrap();
 
-            let (present_index, suboptimal) = swapchain
-                .loader
+            let (present_index, suboptimal) = self.device_context.swapchain_loader
                 .acquire_next_image(
                     swapchain.vk_swapchain,
                     u64::MAX,
@@ -486,12 +505,20 @@ impl VulkanEngine {
                 println!("suboptimal swapchain image acquired");
             }
 
-            self.record_command_buffer(draw_command_buffer, |_, draw_command_buffer| {
-                self.record_draw(
+            let triangle_vert = *self.shaders.get(&varre_assets::ShaderID::SHADER_TRIANGLE_VERTEX)
+                .expect("Triangle vertex shader not found");
+            let triangle_frag = *self.shaders.get(&varre_assets::ShaderID::SHADER_TRIANGLE_FRAGMENT)
+                .expect("Triangle fragment shader not found");
+
+            self.record_command_buffer(draw_command_buffer, |device_context, draw_command_buffer| {
+                command_buffers::record_draw(
+                    device_context,
                     draw_command_buffer,
                     swapchain.images[present_index as usize],
                     swapchain.image_views[present_index as usize],
                     vk::Rect2D::default().extent(swapchain.extent),
+                    triangle_vert,
+                    triangle_frag,
                 );
             });
 
@@ -509,7 +536,7 @@ impl VulkanEngine {
                 .signal_semaphores(&signal_semaphores)
                 .wait_dst_stage_mask(&wait_stage_mask);
 
-            self.device
+            self.device_context.device
                 .queue_submit(self.queue, &[submit_info], draw_command_buffer_fence)
                 .expect("failed to submit command buffer");
 
@@ -522,8 +549,7 @@ impl VulkanEngine {
                 .swapchains(&swapchains)
                 .image_indices(&image_indices);
 
-            swapchain
-                .loader
+            self.device_context.swapchain_loader
                 .queue_present(self.queue, &present_info)
                 .unwrap();
 
@@ -535,48 +561,52 @@ impl VulkanEngine {
 impl Drop for VulkanEngine {
     fn drop(&mut self) {
         unsafe {
-            self.device.device_wait_idle().unwrap();
-            
+            self.device_context.device.device_wait_idle().unwrap();
+
             // Destroy swapchain and related resources
             if let Some(swapchain) = self.swapchain.take() {
                 for view in swapchain.image_views.iter() {
-                    self.device.destroy_image_view(*view, None);
+                    self.device_context.device.destroy_image_view(*view, None);
                 }
-                drop(swapchain); // This calls Swapchain::drop which destroys vk_swapchain
+                self.device_context.swapchain_loader.destroy_swapchain(swapchain.vk_swapchain, None);
             }
-            
+
             // Destroy synchronization primitives
             for semaphore in self.present_complete_semaphores {
-                self.device.destroy_semaphore(semaphore, None);
+                self.device_context.device.destroy_semaphore(semaphore, None);
             }
             for semaphore in self.rendering_complete_semaphores {
-                self.device.destroy_semaphore(semaphore, None);
+                self.device_context.device.destroy_semaphore(semaphore, None);
             }
             for fence in self.draw_command_buffer_fences {
-                self.device.destroy_fence(fence, None);
+                self.device_context.device.destroy_fence(fence, None);
             }
-            
+
             // Destroy shader objects
-            // Shaders are automatically destroyed by ShaderManager's Drop implementation
-            
+            let shader_object_loader = self.device_context.shader_object_loader.as_ref()
+                .expect("shader_object_loader not available");
+            for (_id, shader) in self.shaders.drain() {
+                shader_object_loader.destroy_shader(shader, None);
+            }
+
             // Destroy command pool (this also frees command buffers)
-            self.device.destroy_command_pool(self.command_pool, None);
-            
+            self.device_context.device.destroy_command_pool(self.command_pool, None);
+
             // Destroy device
-            self.device.destroy_device(None);
-            
+            self.device_context.device.destroy_device(None);
+
             // Destroy surface
             if let Some(surface) = self.surface {
-                self.surface_loader.destroy_surface(surface, None);
+                self.device_context.surface_loader.destroy_surface(surface, None);
             }
-            
+
             // Destroy debug utils
             if let Some((ref debug_loader, debug_callback)) = self.debug_utils {
                 debug_loader.destroy_debug_utils_messenger(debug_callback, None);
             }
-            
+
             // Destroy instance
-            self.instance.destroy_instance(None);
+            self.device_context.instance.destroy_instance(None);
         }
     }
 }

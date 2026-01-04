@@ -181,7 +181,13 @@ fn generate_shader_module(out_dir: &str, out_shader_dir: &Path) {
     for name in &shader_names {
         generated_code.push_str(&format!("    {},\n", name));
     }
-    generated_code.push_str(shader_id_suffix);
+
+    // Add ShaderID to the imports in the shaders module
+    let shader_id_suffix = shader_id_suffix.replace(
+        "use super::{Shader, ShaderStage};",
+        "use super::{Shader, ShaderStage, ShaderID};"
+    );
+    generated_code.push_str(&shader_id_suffix);
 
     // Second pass: generate shader constants with id field
     for entry in &entries {
