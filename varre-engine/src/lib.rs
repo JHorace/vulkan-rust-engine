@@ -4,6 +4,7 @@ mod vulkan_swapchain;
 mod shader_utils;
 mod mesh_utils;
 mod memory_utils;
+mod render_context;
 
 use ash::{
     Device, Entry, Instance,
@@ -18,7 +19,11 @@ use std::collections::HashMap;
 use std::ffi::CStr;
 use std::{error::Error, ffi, os::raw::c_char};
 use ash::vk::SurfaceKHR;
-use varre_assets::ShaderID;
+use varre_assets::{ModelID, ShaderID};
+use crate::mesh_utils::VulkanMesh;
+pub use render_context::RenderContextType;
+use render_context::{RenderContext};
+use render_context::triangle::TriangleRenderContext;
 
 pub const NUM_FRAMES_IN_FLIGHT: usize = 3;
 
@@ -175,7 +180,6 @@ pub struct DeviceContext {
 }
 
 
-
 pub struct VulkanEngine {
     device_context: DeviceContext,
     queue: vk::Queue,
@@ -186,14 +190,14 @@ pub struct VulkanEngine {
     one_time_command_buffer: vk::CommandBuffer,
 
     surface: Option<SurfaceKHR>,
-    shaders: HashMap<ShaderID, vk::ShaderEXT>,
-
     swapchain: Option<vulkan_swapchain::Swapchain>,
     present_complete_semaphores: [vk::Semaphore; 3],
     rendering_complete_semaphores: [vk::Semaphore; 3],
 
     frame_index: usize,
     debug_utils: Option<(debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
+
+    render_context: Option<Box<dyn RenderContext>>
 }
 
 impl VulkanEngine {
@@ -308,16 +312,6 @@ impl VulkanEngine {
         let one_time_command_buffer = command_buffers[0];
         let draw_command_buffers = command_buffers[1..][..3].try_into()?;
 
-        // Load all shaders
-        let shader_object_loader = device_context.shader_object_loader.as_ref()
-            .expect("shader_object_loader not available");
-        let mut shaders = HashMap::new();
-        for shader_id in ShaderID::all() {
-            let shader = shader_id.shader();
-            let shader_ext = shader_utils::create_shader_object(shader_object_loader, shader);
-            shaders.insert(shader.id, shader_ext);
-        }
-
         let present_complete_semaphores = unsafe {
             std::array::from_fn(|_| {
                 device_context.device
@@ -342,13 +336,21 @@ impl VulkanEngine {
             draw_command_buffer_fences,
             one_time_command_buffer,
             surface: None,
-            shaders,
             swapchain: None,
             present_complete_semaphores,
             rendering_complete_semaphores,
             frame_index: 0,
             debug_utils,
+            render_context: None
         })
+    }
+
+    pub fn set_render_context(&mut self, context_type: RenderContextType) {
+        match context_type {
+            RenderContextType::Triangle => {
+                self.render_context = Some(Box::new(TriangleRenderContext::new(&self.device_context)));
+            }
+        }
     }
 
     pub fn add_window(&mut self, display_handle: RawDisplayHandle, window_handle: RawWindowHandle, window_width: u32, window_height: u32)
@@ -505,20 +507,15 @@ impl VulkanEngine {
                 println!("suboptimal swapchain image acquired");
             }
 
-            let triangle_vert = *self.shaders.get(&varre_assets::ShaderID::SHADER_TRIANGLE_VERTEX)
-                .expect("Triangle vertex shader not found");
-            let triangle_frag = *self.shaders.get(&varre_assets::ShaderID::SHADER_TRIANGLE_FRAGMENT)
-                .expect("Triangle fragment shader not found");
+            let render_context = self.render_context.as_ref().unwrap();
 
             self.record_command_buffer(draw_command_buffer, |device_context, draw_command_buffer| {
-                command_buffers::record_draw(
+                render_context.record_draw(
                     device_context,
                     draw_command_buffer,
                     swapchain.images[present_index as usize],
                     swapchain.image_views[present_index as usize],
                     vk::Rect2D::default().extent(swapchain.extent),
-                    triangle_vert,
-                    triangle_frag,
                 );
             });
 
@@ -580,13 +577,6 @@ impl Drop for VulkanEngine {
             }
             for fence in self.draw_command_buffer_fences {
                 self.device_context.device.destroy_fence(fence, None);
-            }
-
-            // Destroy shader objects
-            let shader_object_loader = self.device_context.shader_object_loader.as_ref()
-                .expect("shader_object_loader not available");
-            for (_id, shader) in self.shaders.drain() {
-                shader_object_loader.destroy_shader(shader, None);
             }
 
             // Destroy command pool (this also frees command buffers)

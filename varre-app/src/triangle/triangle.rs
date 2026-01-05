@@ -2,11 +2,21 @@ use winit::event::WindowEvent;
 use winit::event_loop::{EventLoopBuilder};
 use winit::platform::wayland::EventLoopBuilderExtWayland;
 use varre_app::*;
-use varre_engine::VulkanEngine;
+use varre_engine::{RenderContextType, VulkanEngine};
 
 struct TriangleApp;
 
+
+
+
+
+
+
 impl VarreApplicationImpl for TriangleApp {
+    fn on_engine_created(&self, engine: &mut VulkanEngine) {
+        engine.set_render_context(RenderContextType::Triangle);
+    }
+
     fn on_window_event(&mut self, event: &WindowEvent, engine: &mut VulkanEngine) -> bool {
         match event {
             WindowEvent::RedrawRequested => {

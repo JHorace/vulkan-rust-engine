@@ -19,6 +19,7 @@ use winit::{
 //         cannot create its own event loop.
 pub trait VarreApplicationImpl {
 
+    fn on_engine_created(&self, engine: &mut VulkanEngine);
     fn on_window_event(&mut self, event: &WindowEvent, engine: &mut VulkanEngine) -> bool {
         // Return true if the event was handled, false to use default handling
         false
@@ -40,6 +41,7 @@ impl VarreApplicationCore {
             app_impl: Some(app_impl),
         }
     }
+    
     pub fn start(&self) {
         
     }
@@ -58,6 +60,7 @@ impl ApplicationHandler for VarreApplicationCore {
         self.engine = Some(
             VulkanEngine::new(true, Some(display_handle)).expect("Failed to create VulkanEngine"),
         );
+        self.app_impl.as_mut().unwrap().on_engine_created(self.engine.as_mut().unwrap());
         self.engine.as_mut().unwrap().add_window(
             display_handle,
             window_handle,

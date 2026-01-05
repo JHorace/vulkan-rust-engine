@@ -1,10 +1,11 @@
 use ash::{vk, ext::{shader_object}, Device};
 use ash::vk::SampleCountFlags;
 use crate::{DeviceContext, VulkanEngine};
+use crate::mesh_utils::VulkanMesh;
 
-fn record_image_layout_transition(device: &Device, cmd : vk::CommandBuffer, img : vk::Image, old_layout : vk::ImageLayout, new_layout : vk::ImageLayout,
-src_access_mask : vk::AccessFlags2, dst_access_mask : vk::AccessFlags2,
-src_stage_mask : vk::PipelineStageFlags2, dst_stage_mask : vk::PipelineStageFlags2) {
+pub fn record_image_layout_transition(device: &Device, cmd : vk::CommandBuffer, img : vk::Image, old_layout : vk::ImageLayout, new_layout : vk::ImageLayout,
+                                  src_access_mask : vk::AccessFlags2, dst_access_mask : vk::AccessFlags2,
+                                  src_stage_mask : vk::PipelineStageFlags2, dst_stage_mask : vk::PipelineStageFlags2) {
    unsafe {
        let img_barrier = [vk::ImageMemoryBarrier2::default()
            .src_access_mask(src_access_mask)
@@ -28,6 +29,12 @@ src_stage_mask : vk::PipelineStageFlags2, dst_stage_mask : vk::PipelineStageFlag
        device.cmd_pipeline_barrier2(cmd, &dependency_info);
    }
 }
+
+pub(crate) fn record_mesh_draw_setup(device_context: &DeviceContext, cmd: &vk::CommandBuffer, mesh: &VulkanMesh) {
+   // Setup vertex and index buffers
+
+}
+
 
 pub(crate) fn record_draw(device_context: &DeviceContext, cmd : vk::CommandBuffer, img : vk::Image, img_view : vk::ImageView, area : vk::Rect2D, triangle_vert: vk::ShaderEXT, triangle_frag: vk::ShaderEXT) {
     unsafe {

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -54,6 +55,9 @@ fn process_shaders(out_dir: &str) {
     let shader_attr_regex = Regex::new(r#"\[shader\("([^"]+)"\)][^(]*\s(\w+)\s*\("#)
         .expect("Invalid regex");
 
+    // Map from output filename to entry point function name
+    let mut entry_point_map = HashMap::new();
+
     for shader_path in slang_files {
         let file_name = shader_path.file_name().unwrap().to_str().unwrap();
         let base_name = shader_path.file_stem().unwrap().to_str().unwrap();
@@ -80,7 +84,11 @@ fn process_shaders(out_dir: &str) {
         for (entry_point, stage_name) in entry_points {
             // Replace hyphens with underscores for the output filename
             let safe_base_name = base_name.replace('-', "_");
-            let output_path = out_shader_dir.join(format!("{}.{}.spv", safe_base_name, stage_name));
+            let output_filename = format!("{}.{}.spv", safe_base_name, stage_name);
+            let output_path = out_shader_dir.join(&output_filename);
+
+            // Store the entry point mapping
+            entry_point_map.insert(output_filename, entry_point.clone());
 
             println!("cargo:info=Compiling shader: {} (entry: {}, stage: {})",
                      file_name, entry_point, stage_name);
@@ -89,6 +97,7 @@ fn process_shaders(out_dir: &str) {
                 .arg(&shader_path)
                 .arg("-target")
                 .arg("spirv")
+                .arg("-fvk-use-entrypoint-name")
                 .arg("-entry")
                 .arg(&entry_point)
                 .arg("-o")
@@ -118,12 +127,12 @@ fn process_shaders(out_dir: &str) {
                 }
             }
         }
-
-        generate_shader_module(out_dir, &out_shader_dir);
     }
+
+    generate_shader_module(out_dir, &out_shader_dir, entry_point_map);
 }
 
-fn generate_shader_module(out_dir: &str, out_shader_dir: &Path) {
+fn generate_shader_module(out_dir: &str, out_shader_dir: &Path, entry_point_map: HashMap<String, String>) {
     // Read the template file
     let template_path = Path::new("shaders_template.rs");
     let template = fs::read_to_string(template_path)
@@ -212,6 +221,10 @@ fn generate_shader_module(out_dir: &str, out_shader_dir: &Path) {
                 .replace('-', "_")
                 .to_uppercase();
 
+            // Look up the actual entry point function name from the map
+            let entry_point_name = entry_point_map.get(file_name)
+                .expect(&format!("Entry point not found for {}", file_name));
+
             // We use a path relative to OUT_DIR for the include_bytes! macro
             let rel_path = format!("shaders/{}", file_name);
 
@@ -234,7 +247,7 @@ fn generate_shader_module(out_dir: &str, out_shader_dir: &Path) {
             ));
             generated_code.push_str(&format!(
                 "        entry_point: \"{}\",\n",
-                base_name
+                entry_point_name
             ));
             generated_code.push_str("    };\n\n");
         }
@@ -433,6 +446,14 @@ fn process_models(out_dir: &str) {
 
     // Generate helper functions to load models by ID
     models_code.push_str("impl ModelID {\n");
+    models_code.push_str("    /// Get all model IDs\n");
+    models_code.push_str("    pub const fn all() -> &'static [ModelID] {\n");
+    models_code.push_str("        &[\n");
+    for name in &model_names {
+        models_code.push_str(&format!("            ModelID::{},\n", name));
+    }
+    models_code.push_str("        ]\n");
+    models_code.push_str("    }\n\n");
     models_code.push_str("    /// Get the binary data for this model\n");
     models_code.push_str("    pub fn data(&self) -> &'static [u8] {\n");
     models_code.push_str("        match self {\n");

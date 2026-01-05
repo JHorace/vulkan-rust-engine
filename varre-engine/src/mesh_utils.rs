@@ -1,7 +1,5 @@
-use std::collections::HashMap;
 use ash::vk;
 use glam::Vec3;
-use varre_assets::ModelID;
 use crate::memory_utils::create_buffer;
 
 pub struct VulkanMesh {
