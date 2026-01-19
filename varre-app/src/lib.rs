@@ -87,7 +87,7 @@ impl ApplicationHandler for VarreApplicationCore {
                     //self.window.as_ref().unwrap().request_redraw();
                 }
                 WindowEvent::SurfaceResized(size) => {
-                    self.engine.as_mut().unwrap().recreate_swapchain(
+                    self.engine.as_mut().unwrap().on_window_resized(
                         size.width,
                         size.height,
                     );

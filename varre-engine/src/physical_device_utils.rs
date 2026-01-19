@@ -69,6 +69,7 @@ pub fn get_physical_devices_supporting_surface(physical_devices: Vec<vk::Physica
 
 pub fn select_physical_device(physical_devices: Vec<vk::PhysicalDevice>, instance: &ash::Instance) -> vk::PhysicalDevice {
     unsafe {
+        /*
         physical_devices
             .into_iter()
             .find(|&physical_device| {
@@ -78,5 +79,8 @@ pub fn select_physical_device(physical_devices: Vec<vk::PhysicalDevice>, instanc
                     == vk::PhysicalDeviceType::DISCRETE_GPU
             })
             .expect("failed to find a suitable GPU")
+
+         */
+        physical_devices[0]
     }
 }

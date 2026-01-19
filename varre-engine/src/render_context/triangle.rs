@@ -15,10 +15,10 @@ impl TriangleRenderContext {
     pub fn new(device_context: &DeviceContext) -> Self {
       
         let vert_shader = ShaderID::SHADER_TRIANGLE_VERTEX.shader();
-        let triangle_vert = create_shader_object(device_context.shader_object_loader.as_ref().unwrap(), vert_shader);
+        let triangle_vert = create_shader_object(device_context, vert_shader);
         
         let frag_shader = ShaderID::SHADER_TRIANGLE_FRAGMENT.shader();
-        let triangle_frag = create_shader_object(device_context.shader_object_loader.as_ref().unwrap(), frag_shader);
+        let triangle_frag = create_shader_object(device_context, frag_shader);
         
         Self{
            triangle_vert, triangle_frag

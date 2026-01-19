@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use regex::Regex;
 use russimp::scene::{PostProcess, Scene};
+use rspirv_reflect as rr;
 
 fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
@@ -132,6 +133,49 @@ fn process_shaders(out_dir: &str) {
     generate_shader_module(out_dir, &out_shader_dir, entry_point_map);
 }
 
+fn reflect_descriptor_bindings(spirv_data: &[u8]) -> Result<Vec<(u32, u32, rr::DescriptorType, u32)>, String> {
+    let reflection = rr::Reflection::new_from_spirv(spirv_data)
+        .map_err(|e| format!("Failed to create reflection: {:?}", e))?;
+
+    let mut all_bindings = Vec::new();
+
+    let descriptor_sets = reflection.get_descriptor_sets()
+        .map_err(|e| format!("Failed to get descriptor sets: {:?}", e))?;
+
+    // Iterate over all descriptor sets
+    for (set_index, bindings_map) in descriptor_sets.iter() {
+        // Iterate over all bindings in this set
+        for (binding_index, descriptor_info) in bindings_map.iter() {
+            let count = match &descriptor_info.binding_count {
+                rr::BindingCount::One => 1u32,
+                rr::BindingCount::StaticSized(n) => *n as u32,
+                rr::BindingCount::Unbounded => 0u32, // Unbounded arrays
+            };
+
+            all_bindings.push((*set_index, *binding_index, descriptor_info.ty, count));
+        }
+    }
+
+    Ok(all_bindings)
+}
+
+fn descriptor_type_to_vk_value(desc_type: rr::DescriptorType) -> u32 {
+    match desc_type {
+        rr::DescriptorType::SAMPLER => 0,
+        rr::DescriptorType::COMBINED_IMAGE_SAMPLER => 1,
+        rr::DescriptorType::SAMPLED_IMAGE => 2,
+        rr::DescriptorType::STORAGE_IMAGE => 3,
+        rr::DescriptorType::UNIFORM_TEXEL_BUFFER => 4,
+        rr::DescriptorType::STORAGE_TEXEL_BUFFER => 5,
+        rr::DescriptorType::UNIFORM_BUFFER => 6,
+        rr::DescriptorType::STORAGE_BUFFER => 7,
+        rr::DescriptorType::UNIFORM_BUFFER_DYNAMIC => 8,
+        rr::DescriptorType::STORAGE_BUFFER_DYNAMIC => 9,
+        rr::DescriptorType::INPUT_ATTACHMENT => 10,
+        _ => 0,
+    }
+}
+
 fn generate_shader_module(out_dir: &str, out_shader_dir: &Path, entry_point_map: HashMap<String, String>) {
     // Read the template file
     let template_path = Path::new("shaders_template.rs");
@@ -142,7 +186,7 @@ fn generate_shader_module(out_dir: &str, out_shader_dir: &Path, entry_point_map:
     let (before_shader_id, after_shader_id) = template.split_once("    // ShaderID variants will be generated here by build.rs")
         .expect("Template missing ShaderID placeholder comment");
 
-    let (shader_id_suffix, after_shader_struct) = after_shader_id.split_once("    // Shader constants will be generated here by build.rs")
+    let (shader_id_suffix, _after_shader_struct) = after_shader_id.split_once("    // Shader constants will be generated here by build.rs")
         .expect("Template missing Shader constants placeholder comment");
 
     let mut generated_code = String::from(before_shader_id);
@@ -156,6 +200,19 @@ fn generate_shader_module(out_dir: &str, out_shader_dir: &Path, entry_point_map:
             "geometry" => "ShaderStage::Geometry",
             "tesscontrol" => "ShaderStage::TessellationControl",
             "tesseval" => "ShaderStage::TessellationEvaluation",
+            _ => panic!("Unknown shader stage: {}", stage),
+        }
+    }
+
+    // Helper function to map stage names to Vulkan stage flags
+    fn stage_to_vk_flags(stage: &str) -> u32 {
+        match stage {
+            "vertex" => 0x00000001,      // VK_SHADER_STAGE_VERTEX_BIT
+            "fragment" => 0x00000010,    // VK_SHADER_STAGE_FRAGMENT_BIT
+            "compute" => 0x00000020,     // VK_SHADER_STAGE_COMPUTE_BIT
+            "geometry" => 0x00000008,    // VK_SHADER_STAGE_GEOMETRY_BIT
+            "tesscontrol" => 0x00000002, // VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT
+            "tesseval" => 0x00000004,    // VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT
             _ => panic!("Unknown shader stage: {}", stage),
         }
     }
@@ -191,10 +248,10 @@ fn generate_shader_module(out_dir: &str, out_shader_dir: &Path, entry_point_map:
         generated_code.push_str(&format!("    {},\n", name));
     }
 
-    // Add ShaderID to the imports in the shaders module
+    // Add ShaderID and VkDescriptorSetLayoutBinding to the imports in the shaders module
     let shader_id_suffix = shader_id_suffix.replace(
         "use super::{Shader, ShaderStage};",
-        "use super::{Shader, ShaderStage, ShaderID};"
+        "use super::{Shader, ShaderStage, ShaderID, VkDescriptorSetLayoutBinding};"
     );
     generated_code.push_str(&shader_id_suffix);
 
@@ -211,7 +268,7 @@ fn generate_shader_module(out_dir: &str, out_shader_dir: &Path, entry_point_map:
                 continue;
             }
 
-            let base_name = parts[0..parts.len()-1].join("_");
+            let _base_name = parts[0..parts.len()-1].join("_");
             let stage = parts[parts.len()-1];
 
             // Transform "name.stage.spv" into a valid Rust identifier "NAME_STAGE"
@@ -224,6 +281,43 @@ fn generate_shader_module(out_dir: &str, out_shader_dir: &Path, entry_point_map:
             // Look up the actual entry point function name from the map
             let entry_point_name = entry_point_map.get(file_name)
                 .expect(&format!("Entry point not found for {}", file_name));
+
+            // Read SPIRV binary and reflect descriptor bindings
+            let spirv_data = fs::read(&path)
+                .expect(&format!("Failed to read SPIRV file: {}", file_name));
+
+            let bindings_array_name = format!("{}_BINDINGS", var_name);
+
+            // Reflect descriptor bindings
+            match reflect_descriptor_bindings(&spirv_data) {
+                Ok(all_bindings) if !all_bindings.is_empty() => {
+                    generated_code.push_str(&format!(
+                        "    const {}: [VkDescriptorSetLayoutBinding; {}] = [\n",
+                        bindings_array_name,
+                        all_bindings.len()
+                    ));
+
+                    for (set_index, binding_num, desc_type, count) in &all_bindings {
+                        let descriptor_type_value = descriptor_type_to_vk_value(*desc_type);
+
+                        generated_code.push_str("        VkDescriptorSetLayoutBinding {\n");
+                        generated_code.push_str(&format!("            set: {},\n", set_index));
+                        generated_code.push_str(&format!("            binding: {},\n", binding_num));
+                        generated_code.push_str(&format!("            descriptor_type: {},\n", descriptor_type_value));
+                        generated_code.push_str(&format!("            descriptor_count: {},\n", count));
+                        generated_code.push_str(&format!("            stage_flags: {},\n", stage_to_vk_flags(stage)));
+                        generated_code.push_str("        },\n");
+                    }
+
+                    generated_code.push_str("    ];\n\n");
+                },
+                Ok(_) => {
+                    // Empty bindings, no array needed
+                },
+                Err(e) => {
+                    println!("cargo:warning=Failed to reflect SPIRV for {}: {}", file_name, e);
+                }
+            }
 
             // We use a path relative to OUT_DIR for the include_bytes! macro
             let rel_path = format!("shaders/{}", file_name);
@@ -249,6 +343,21 @@ fn generate_shader_module(out_dir: &str, out_shader_dir: &Path, entry_point_map:
                 "        entry_point: \"{}\",\n",
                 entry_point_name
             ));
+
+            // Check if bindings array was generated
+            let has_bindings = reflect_descriptor_bindings(&spirv_data)
+                .map(|bindings| !bindings.is_empty())
+                .unwrap_or(false);
+
+            if has_bindings {
+                generated_code.push_str(&format!(
+                    "        descriptor_set_layout_bindings: &{},\n",
+                    bindings_array_name
+                ));
+            } else {
+                generated_code.push_str("        descriptor_set_layout_bindings: &[],\n");
+            }
+
             generated_code.push_str("    };\n\n");
         }
     }
@@ -324,13 +433,17 @@ fn process_models(out_dir: &str) {
     let (before_model_id, after_model_id) = template.split_once("    // ModelID variants will be generated here by build.rs")
         .expect("Template missing ModelID placeholder comment");
 
-    let (model_id_suffix, after_model_struct) = after_model_id.split_once("    // Model constants will be generated here by build.rs")
+    let (model_id_suffix, _after_model_struct) = after_model_id.split_once("    // Model constants will be generated here by build.rs")
         .expect("Template missing Model constants placeholder comment");
 
     let mut models_code = String::from(before_model_id);
 
     // First pass: collect all model names for the enum
     let mut model_names = Vec::new();
+
+    // Add generated cube model
+    model_names.push("CUBE".to_string());
+
     for model_path in &obj_files {
         let base_name = model_path.file_stem().unwrap().to_str().unwrap();
         let var_name = base_name
@@ -345,6 +458,47 @@ fn process_models(out_dir: &str) {
         models_code.push_str(&format!("    {},\n", name));
     }
     models_code.push_str(model_id_suffix);
+
+    // Generate cube model data
+    let (cube_vertices, cube_indices, cube_uvs) = generate_cube_model();
+
+    let mut cube_binary_data = Vec::new();
+
+    // Write vertex count
+    let vertex_count = cube_vertices.len() / 3;
+    cube_binary_data.extend_from_slice(&(vertex_count as u32).to_le_bytes());
+
+    // Write vertices
+    for v in &cube_vertices {
+        cube_binary_data.extend_from_slice(&v.to_le_bytes());
+    }
+
+    // Write index count
+    cube_binary_data.extend_from_slice(&(cube_indices.len() as u32).to_le_bytes());
+
+    // Write indices
+    for idx in &cube_indices {
+        cube_binary_data.extend_from_slice(&idx.to_le_bytes());
+    }
+
+    // Write UV count
+    cube_binary_data.extend_from_slice(&(cube_uvs.len() as u32).to_le_bytes());
+
+    // Write UVs
+    for uv in &cube_uvs {
+        cube_binary_data.extend_from_slice(&uv.to_le_bytes());
+    }
+
+    // Write cube binary file
+    let cube_bin_path = out_models_dir.join("cube.bin");
+    fs::write(&cube_bin_path, &cube_binary_data).expect("Failed to write cube model file");
+
+    models_code.push_str(&format!(
+        "    pub const CUBE_DATA: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/models/cube.bin\"));\n\n"
+    ));
+
+    println!("cargo:info=Generated cube model with {} vertices, {} indices ({} bytes)",
+             vertex_count, cube_indices.len(), cube_binary_data.len());
 
     // Second pass: generate model constants with id field
     for model_path in obj_files {
@@ -470,4 +624,53 @@ fn process_models(out_dir: &str) {
 
     let dest_path = Path::new(out_dir).join("models.rs");
     fs::write(dest_path, models_code).expect("Failed to write generated models.rs");
+}
+
+fn generate_cube_model() -> (Vec<f32>, Vec<u32>, Vec<f32>) {
+    // Cube vertices: 8 unique positions
+    #[rustfmt::skip]
+    let vertices = vec![
+        // Front face
+        -0.5, -0.5,  0.5,  // 0
+         0.5, -0.5,  0.5,  // 1
+         0.5,  0.5,  0.5,  // 2
+        -0.5,  0.5,  0.5,  // 3
+        // Back face
+        -0.5, -0.5, -0.5,  // 4
+         0.5, -0.5, -0.5,  // 5
+         0.5,  0.5, -0.5,  // 6
+        -0.5,  0.5, -0.5,  // 7
+    ];
+
+    // Cube indices: 36 indices (6 faces * 2 triangles * 3 vertices)
+    #[rustfmt::skip]
+    let indices = vec![
+        // Front face
+        0, 1, 2,  2, 3, 0,
+        // Right face
+        1, 5, 6,  6, 2, 1,
+        // Back face
+        5, 4, 7,  7, 6, 5,
+        // Left face
+        4, 0, 3,  3, 7, 4,
+        // Top face
+        3, 2, 6,  6, 7, 3,
+        // Bottom face
+        4, 5, 1,  1, 0, 4,
+    ];
+
+    // UV coordinates: one per vertex
+    #[rustfmt::skip]
+    let uvs = vec![
+        0.0, 0.0,  // 0
+        1.0, 0.0,  // 1
+        1.0, 1.0,  // 2
+        0.0, 1.0,  // 3
+        0.0, 0.0,  // 4
+        1.0, 0.0,  // 5
+        1.0, 1.0,  // 6
+        0.0, 1.0,  // 7
+    ];
+
+    (vertices, indices, uvs)
 }

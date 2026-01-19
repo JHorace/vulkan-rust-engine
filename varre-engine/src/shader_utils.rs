@@ -1,6 +1,7 @@
 use ash::vk;
 use ash::ext::shader_object;
 use std::ffi::CStr;
+use crate::DeviceContext;
 
 // Helper trait for converting ShaderStage to Vulkan flags
 pub trait ToVkShaderStage {
@@ -34,10 +35,8 @@ impl VulkanShader {
         device_context: &crate::DeviceContext,
         shader: &varre_assets::Shader,
     ) -> Self {
-        let shader_object_loader = device_context.shader_object_loader.as_ref()
-            .expect("shader_object_loader not available");
         let stage = shader.stage.to_vk();
-        let shader_ext = create_shader_object(shader_object_loader, shader);
+        let shader_ext = create_shader_object(device_context, shader);
 
         Self {
             stage,
@@ -86,10 +85,52 @@ fn get_next_stages(stage: vk::ShaderStageFlags) -> vk::ShaderStageFlags {
     }
 }
 
+/// Convert varre_assets descriptor bindings to Vulkan descriptor bindings (without set index)
+fn convert_binding(b: &varre_assets::VkDescriptorSetLayoutBinding) -> vk::DescriptorSetLayoutBinding {
+    vk::DescriptorSetLayoutBinding::default()
+        .binding(b.binding)
+        .descriptor_type(vk::DescriptorType::from_raw(b.descriptor_type as i32))
+        .descriptor_count(b.descriptor_count)
+        .stage_flags(vk::ShaderStageFlags::from_raw(b.stage_flags))
+}
+
+pub fn make_descriptor_set_layouts(device_context: &DeviceContext, shader: &varre_assets::Shader) -> Vec<vk::DescriptorSetLayout> {
+    if shader.descriptor_set_layout_bindings.is_empty() {
+        return Vec::new();
+    }
+
+    // Group bindings by set index
+    use std::collections::BTreeMap;
+    let mut sets: BTreeMap<u32, Vec<vk::DescriptorSetLayoutBinding>> = BTreeMap::new();
+
+    for binding in shader.descriptor_set_layout_bindings {
+        sets.entry(binding.set)
+            .or_insert_with(Vec::new)
+            .push(convert_binding(binding));
+    }
+
+    // Create a descriptor set layout for each set, in order
+    let mut layouts = Vec::new();
+    for (_set_index, bindings) in sets {
+        let layout_create_info = vk::DescriptorSetLayoutCreateInfo::default()
+            .bindings(&bindings);
+
+        let layout = unsafe {
+            device_context.device.create_descriptor_set_layout(&layout_create_info, None).unwrap()
+        };
+
+        layouts.push(layout);
+    }
+
+    layouts
+}
+
 pub fn create_shader_object(
-    shader_object_loader: &shader_object::Device,
+    device_context: &DeviceContext,
     shader: &varre_assets::Shader,
 ) -> vk::ShaderEXT {
+    let shader_object_loader = device_context.shader_object_loader.as_ref()
+        .expect("shader_object_loader not available");
     let stage = shader.stage.to_vk();
     let next_stage = get_next_stages(stage);
 
@@ -98,16 +139,20 @@ pub fn create_shader_object(
     let entry_point = CStr::from_bytes_with_nul(entry_point_string.as_bytes())
         .expect("Invalid entry point");
 
+    let descriptor_set_layouts = make_descriptor_set_layouts(device_context, shader);
+    let layouts_slice = descriptor_set_layouts.as_slice();
+
     unsafe {
-        let shader_create_info = [vk::ShaderCreateInfoEXT::default()
+        let shader_create_info = vk::ShaderCreateInfoEXT::default()
             .stage(stage)
             .code_type(vk::ShaderCodeTypeEXT::SPIRV)
             .code(shader.spv)
             .name(entry_point)
-            .next_stage(next_stage)];
+            .next_stage(next_stage)
+            .set_layouts(layouts_slice);
 
         shader_object_loader
-            .create_shaders(&shader_create_info, None)
+            .create_shaders(&[shader_create_info], None)
             .expect("failed to create shaders")[0]
     }
 }

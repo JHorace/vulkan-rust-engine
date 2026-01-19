@@ -1,11 +1,16 @@
 mod command_buffers;
-mod physical_device_utils;
-mod vulkan_swapchain;
-mod shader_utils;
-mod mesh_utils;
+mod geometry;
 mod memory_utils;
+mod mesh_utils;
+mod physical_device_utils;
 mod render_context;
+mod shader_utils;
+mod vulkan_window;
+mod extensions;
 
+use crate::mesh_utils::VulkanMesh;
+use crate::render_context::mesh_simple::MeshSimpleRenderContext;
+use ash::vk::SurfaceKHR;
 use ash::{
     Device, Entry, Instance,
     ext::{debug_utils, shader_object},
@@ -14,16 +19,15 @@ use ash::{
 };
 use physical_device_utils::*;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+use render_context::RenderContext;
+pub use render_context::RenderContextType;
+use render_context::triangle::TriangleRenderContext;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::{error::Error, ffi, os::raw::c_char};
-use ash::vk::SurfaceKHR;
 use varre_assets::{ModelID, ShaderID};
-use crate::mesh_utils::VulkanMesh;
-pub use render_context::RenderContextType;
-use render_context::{RenderContext};
-use render_context::triangle::TriangleRenderContext;
+use crate::extensions::unified_image_layouts;
 
 pub const NUM_FRAMES_IN_FLIGHT: usize = 3;
 
@@ -138,13 +142,16 @@ fn create_device(
         );
     }
 
-    let device_extension_names_raw: Vec<*const c_char> = [shader_object::NAME.as_ptr()]
+    let device_extension_names_raw: Vec<*const c_char> = [shader_object::NAME.as_ptr(), unified_image_layouts::NAME.as_ptr()]
         .into_iter()
         .chain((!headless).then_some(swapchain::NAME.as_ptr()))
         .collect();
 
     let mut shader_object_features =
         vk::PhysicalDeviceShaderObjectFeaturesEXT::default().shader_object(true);
+
+    let mut unified_image_layouts_features =
+        unified_image_layouts::PhysicalDeviceUnifiedImageLayoutsFeaturesKHR::default().unified_image_layouts(true);
 
     let mut vulkan11_features =
         vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
@@ -157,6 +164,7 @@ fn create_device(
         .queue_create_infos(&queue_create_infos)
         .enabled_extension_names(&device_extension_names_raw)
         .push_next(&mut shader_object_features)
+        .push_next(&mut unified_image_layouts_features)
         .push_next(&mut vulkan11_features)
         .push_next(&mut vulkan13_features);
 
@@ -179,7 +187,6 @@ pub struct DeviceContext {
     pub shader_object_loader: Option<shader_object::Device>,
 }
 
-
 pub struct VulkanEngine {
     device_context: DeviceContext,
     queue: vk::Queue,
@@ -190,14 +197,14 @@ pub struct VulkanEngine {
     one_time_command_buffer: vk::CommandBuffer,
 
     surface: Option<SurfaceKHR>,
-    swapchain: Option<vulkan_swapchain::Swapchain>,
+    window: Option<vulkan_window::VulkanWindow>,
     present_complete_semaphores: [vk::Semaphore; 3],
     rendering_complete_semaphores: [vk::Semaphore; 3],
 
     frame_index: usize,
     debug_utils: Option<(debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
 
-    render_context: Option<Box<dyn RenderContext>>
+    render_context: Option<Box<dyn RenderContext>>,
 }
 
 impl VulkanEngine {
@@ -277,7 +284,11 @@ impl VulkanEngine {
         };
 
         let queue = unsafe {
-            Device::get_device_queue(&device_context.device, queue_family_indices.graphics_general.unwrap(), 0)
+            Device::get_device_queue(
+                &device_context.device,
+                queue_family_indices.graphics_general.unwrap(),
+                0,
+            )
         };
 
         let command_pool_create_info = vk::CommandPoolCreateInfo::default()
@@ -285,7 +296,8 @@ impl VulkanEngine {
             .queue_family_index(queue_family_indices.graphics_general.unwrap());
 
         let command_pool = unsafe {
-            device_context.device
+            device_context
+                .device
                 .create_command_pool(&command_pool_create_info, None)
                 .expect("failed to create command pool")
         };
@@ -295,15 +307,19 @@ impl VulkanEngine {
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY);
 
-        let command_buffers =
-            unsafe { device_context.device.allocate_command_buffers(&command_buffer_allocate_info)? };
+        let command_buffers = unsafe {
+            device_context
+                .device
+                .allocate_command_buffers(&command_buffer_allocate_info)?
+        };
 
         let fence_create_info =
             vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
 
         let draw_command_buffer_fences = unsafe {
             std::array::from_fn(|_| {
-                device_context.device
+                device_context
+                    .device
                     .create_fence(&fence_create_info, None)
                     .expect("failed to create fence")
             })
@@ -314,7 +330,8 @@ impl VulkanEngine {
 
         let present_complete_semaphores = unsafe {
             std::array::from_fn(|_| {
-                device_context.device
+                device_context
+                    .device
                     .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
                     .expect("failed to create semaphore")
             })
@@ -322,7 +339,8 @@ impl VulkanEngine {
 
         let rendering_complete_semaphores = unsafe {
             std::array::from_fn(|_| {
-                device_context.device
+                device_context
+                    .device
                     .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
                     .expect("failed to create semaphore")
             })
@@ -336,104 +354,75 @@ impl VulkanEngine {
             draw_command_buffer_fences,
             one_time_command_buffer,
             surface: None,
-            swapchain: None,
+            window: None,
             present_complete_semaphores,
             rendering_complete_semaphores,
             frame_index: 0,
             debug_utils,
-            render_context: None
+            render_context: None,
         })
     }
 
     pub fn set_render_context(&mut self, context_type: RenderContextType) {
         match context_type {
             RenderContextType::Triangle => {
-                self.render_context = Some(Box::new(TriangleRenderContext::new(&self.device_context)));
+                self.render_context =
+                    Some(Box::new(TriangleRenderContext::new(&self.device_context)));
+            }
+            RenderContextType::MeshSimple => {
+                self.render_context =
+                    Some(Box::new(MeshSimpleRenderContext::new(&self.device_context)));
             }
         }
     }
 
-    pub fn add_window(&mut self, display_handle: RawDisplayHandle, window_handle: RawWindowHandle, window_width: u32, window_height: u32)
-    {
-        let surface = unsafe {
-            ash_window::create_surface(
-                &self.device_context.entry,
-                &self.device_context.instance,
-                display_handle,
-                window_handle,
-                None,
-            )
-                .expect("failed to create surface")
-        };
-
-        self.surface = Some(surface);
-        self.create_swapchain(surface, window_width, window_height);
-    }
-
-    pub fn create_swapchain(&mut self, surface: SurfaceKHR, window_width: u32, window_height: u32) {
-        let surface_format = unsafe {
-            self.device_context.surface_loader
-                .get_physical_device_surface_formats(self.device_context.physical_device, surface)
-                .unwrap()[0]
-        };
-
-        let surface_capabilities = unsafe {
-            self.device_context.surface_loader
-                .get_physical_device_surface_capabilities(self.device_context.physical_device, surface)
-                .unwrap()
-        };
-
-        let present_modes = unsafe {
-            self.device_context.surface_loader
-                .get_physical_device_surface_present_modes(self.device_context.physical_device, surface)
-                .unwrap()
-        };
-
-        let swapchain = vulkan_swapchain::Swapchain::new(
+    pub fn add_window(
+        &mut self,
+        display_handle: RawDisplayHandle,
+        window_handle: RawWindowHandle,
+        window_width: u32,
+        window_height: u32,
+    ) {
+        self.window = Some(vulkan_window::VulkanWindow::new(
             &self.device_context,
-            surface,
+            (display_handle, window_handle),
             vk::Extent2D {
                 width: window_width,
                 height: window_height,
             },
-            surface_capabilities,
-            present_modes,
-            surface_format,
-        );
-
-        self.swapchain = Some(swapchain);
+        ))
     }
 
-    pub fn recreate_swapchain(
-        &mut self,
-        window_width: u32,
-        window_height: u32,
-    ) {
-     unsafe {
-         self.device_context.device.device_wait_idle().unwrap();
-         for view in self.swapchain.as_mut().unwrap().image_views.iter() {
-             self.device_context.device.destroy_image_view(*view, None);
-         }
-         self.device_context.swapchain_loader.destroy_swapchain(self.swapchain.as_ref().unwrap().vk_swapchain, None);
-         self.swapchain = None;
-         self.create_swapchain(self.surface.unwrap(), window_width, window_height);
-     }
+    pub fn on_window_resized(&mut self, window_width: u32, window_height: u32) {
+        unsafe {
+            self.window.as_mut().unwrap().on_window_resized(
+                &self.device_context,
+                vk::Extent2D {
+                    width: window_width,
+                    height: window_height,
+                },
+            )
+        }
     }
 
-    pub fn record_and_submit_one_time_command_buffer<F: FnOnce(&DeviceContext, vk::CommandBuffer)>(
+    pub fn record_and_submit_one_time_command_buffer<
+        F: FnOnce(&DeviceContext, vk::CommandBuffer),
+    >(
         &self,
         f: F,
     ) {
         unsafe {
             self.record_command_buffer(self.one_time_command_buffer, f);
 
-            self.device_context.device
+            self.device_context
+                .device
                 .queue_wait_idle(self.queue)
                 .expect("failed to wait for queue idle");
 
             self.submit_command_buffer(self.one_time_command_buffer);
 
-            self.device_context.device
+            self.device_context
+                .device
                 .queue_wait_idle(self.queue)
                 .expect("failed to wait for queue idle");
         }
@@ -445,7 +434,8 @@ impl VulkanEngine {
         f: F,
     ) {
         unsafe {
-            self.device_context.device
+            self.device_context
+                .device
                 .reset_command_buffer(
                     command_buffer,
                     vk::CommandBufferResetFlags::RELEASE_RESOURCES,
@@ -455,13 +445,15 @@ impl VulkanEngine {
             let command_buffer_begin_info = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-            self.device_context.device
+            self.device_context
+                .device
                 .begin_command_buffer(command_buffer, &command_buffer_begin_info)
                 .expect("failed to begin command buffer");
 
             f(&self.device_context, command_buffer);
 
-            self.device_context.device
+            self.device_context
+                .device
                 .end_command_buffer(command_buffer)
                 .expect("failed to end command buffer");
         }
@@ -473,7 +465,8 @@ impl VulkanEngine {
 
             let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
 
-            self.device_context.device
+            self.device_context
+                .device
                 .queue_submit(self.queue, &[submit_info], vk::Fence::null())
                 .expect("failed to submit command buffer");
         }
@@ -485,16 +478,20 @@ impl VulkanEngine {
             let draw_command_buffer_fence = self.draw_command_buffer_fences[self.frame_index];
             let present_complete_semaphore = self.present_complete_semaphores[self.frame_index];
 
-            self.device_context.device
+            self.device_context
+                .device
                 .wait_for_fences(&[draw_command_buffer_fence], true, u64::MAX)
                 .unwrap();
-            self.device_context.device
+            self.device_context
+                .device
                 .reset_fences(&[draw_command_buffer_fence])
                 .unwrap();
 
-            let swapchain = self.swapchain.as_ref().unwrap();
+            let swapchain = self.window.as_ref().unwrap();
 
-            let (present_index, suboptimal) = self.device_context.swapchain_loader
+            let (present_index, suboptimal) = self
+                .device_context
+                .swapchain_loader
                 .acquire_next_image(
                     swapchain.vk_swapchain,
                     u64::MAX,
@@ -509,15 +506,18 @@ impl VulkanEngine {
 
             let render_context = self.render_context.as_ref().unwrap();
 
-            self.record_command_buffer(draw_command_buffer, |device_context, draw_command_buffer| {
-                render_context.record_draw(
-                    device_context,
-                    draw_command_buffer,
-                    swapchain.images[present_index as usize],
-                    swapchain.image_views[present_index as usize],
-                    vk::Rect2D::default().extent(swapchain.extent),
-                );
-            });
+            self.record_command_buffer(
+                draw_command_buffer,
+                |device_context, draw_command_buffer| {
+                    render_context.record_draw(
+                        device_context,
+                        draw_command_buffer,
+                        swapchain.swapchain_images[present_index as usize],
+                        swapchain.swapchain_image_views[present_index as usize],
+                        vk::Rect2D::default().extent(swapchain.extent),
+                    );
+                },
+            );
 
             let rendering_complete_semaphore =
                 self.rendering_complete_semaphores[present_index as usize];
@@ -533,7 +533,8 @@ impl VulkanEngine {
                 .signal_semaphores(&signal_semaphores)
                 .wait_dst_stage_mask(&wait_stage_mask);
 
-            self.device_context.device
+            self.device_context
+                .device
                 .queue_submit(self.queue, &[submit_info], draw_command_buffer_fence)
                 .expect("failed to submit command buffer");
 
@@ -546,7 +547,8 @@ impl VulkanEngine {
                 .swapchains(&swapchains)
                 .image_indices(&image_indices);
 
-            self.device_context.swapchain_loader
+            self.device_context
+                .swapchain_loader
                 .queue_present(self.queue, &present_info)
                 .unwrap();
 
@@ -561,33 +563,43 @@ impl Drop for VulkanEngine {
             self.device_context.device.device_wait_idle().unwrap();
 
             // Destroy swapchain and related resources
-            if let Some(swapchain) = self.swapchain.take() {
-                for view in swapchain.image_views.iter() {
+            if let Some(swapchain) = self.window.take() {
+                for view in swapchain.swapchain_image_views.iter() {
                     self.device_context.device.destroy_image_view(*view, None);
                 }
-                self.device_context.swapchain_loader.destroy_swapchain(swapchain.vk_swapchain, None);
+                self.device_context
+                    .swapchain_loader
+                    .destroy_swapchain(swapchain.vk_swapchain, None);
             }
 
             // Destroy synchronization primitives
             for semaphore in self.present_complete_semaphores {
-                self.device_context.device.destroy_semaphore(semaphore, None);
+                self.device_context
+                    .device
+                    .destroy_semaphore(semaphore, None);
             }
             for semaphore in self.rendering_complete_semaphores {
-                self.device_context.device.destroy_semaphore(semaphore, None);
+                self.device_context
+                    .device
+                    .destroy_semaphore(semaphore, None);
             }
             for fence in self.draw_command_buffer_fences {
                 self.device_context.device.destroy_fence(fence, None);
             }
 
             // Destroy command pool (this also frees command buffers)
-            self.device_context.device.destroy_command_pool(self.command_pool, None);
+            self.device_context
+                .device
+                .destroy_command_pool(self.command_pool, None);
 
             // Destroy device
             self.device_context.device.destroy_device(None);
 
             // Destroy surface
             if let Some(surface) = self.surface {
-                self.device_context.surface_loader.destroy_surface(surface, None);
+                self.device_context
+                    .surface_loader
+                    .destroy_surface(surface, None);
             }
 
             // Destroy debug utils

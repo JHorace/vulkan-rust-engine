@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "triangle"
 path = "src/triangle/triangle.rs"
 
+[[bin]]
+name = "mesh_simple"
+path = "src/mesh_simple/mesh_simple.rs"
+
 [dependencies]
 winit = "0.31.0-beta.2"
 varre-engine = { workspace = true }

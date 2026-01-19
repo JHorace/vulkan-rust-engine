@@ -19,12 +19,23 @@ pub enum ShaderID {
     // ShaderID variants will be generated here by build.rs
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct VkDescriptorSetLayoutBinding {
+    pub set: u32,
+    pub binding: u32,
+    pub descriptor_type: u32,
+    pub descriptor_count: u32,
+    pub stage_flags: u32,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Shader {
     pub id: ShaderID,
     pub spv: &'static [u8],
     pub stage: ShaderStage,
     pub entry_point: &'static str,
+    pub descriptor_set_layout_bindings: &'static [VkDescriptorSetLayoutBinding],
 }
 
 pub mod shaders {

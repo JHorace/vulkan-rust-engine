@@ -4,11 +4,11 @@ use winit::platform::wayland::EventLoopBuilderExtWayland;
 use varre_app::*;
 use varre_engine::{RenderContextType, VulkanEngine};
 
-struct TriangleApp;
+struct MeshSimpleApp;
 
-impl VarreApplicationImpl for TriangleApp {
+impl VarreApplicationImpl for MeshSimpleApp{
     fn on_engine_created(&self, engine: &mut VulkanEngine) {
-        engine.set_render_context(RenderContextType::Triangle);
+        engine.set_render_context(RenderContextType::MeshSimple);
     }
 
     fn on_window_event(&mut self, event: &WindowEvent, engine: &mut VulkanEngine) -> bool {
@@ -29,13 +29,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
         .build()
         .expect("varre-app: winit could not create an event loop");
-     // let event_loop = EventLoop::builder().with_wayland()
-     //     .build().expect("Failed to create event loop");
+    // let event_loop = EventLoop::builder().with_wayland()
+    //     .build().expect("Failed to create event loop");
 
-    let app = VarreApplicationCore::new(Box::new(TriangleApp));
+    let app = VarreApplicationCore::new(Box::new(MeshSimpleApp));
 
     event_loop.run_app(app).expect("Failed to run app");
 
 
-Ok(())
+    Ok(())
 }
