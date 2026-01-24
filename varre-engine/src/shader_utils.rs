@@ -24,27 +24,6 @@ impl ToVkShaderStage for varre_assets::ShaderStage {
     }
 }
 
-pub struct VulkanShader {
-    pub stage: vk::ShaderStageFlags,
-    pub shader: vk::ShaderEXT,
-}
-
-impl VulkanShader {
-    /// Create a VulkanShader from a varre_assets::Shader
-    pub fn from_shader(
-        device_context: &crate::DeviceContext,
-        shader: &varre_assets::Shader,
-    ) -> Self {
-        let stage = shader.stage.to_vk();
-        let shader_ext = create_shader_object(device_context, shader);
-
-        Self {
-            stage,
-            shader: shader_ext,
-        }
-    }
-}
-
 /// Determine valid next stages for a given shader stage in the graphics pipeline
 fn get_next_stages(stage: vk::ShaderStageFlags) -> vk::ShaderStageFlags {
     match stage {
@@ -94,19 +73,21 @@ fn convert_binding(b: &varre_assets::VkDescriptorSetLayoutBinding) -> vk::Descri
         .stage_flags(vk::ShaderStageFlags::from_raw(b.stage_flags))
 }
 
-pub fn make_descriptor_set_layouts(device_context: &DeviceContext, shader: &varre_assets::Shader) -> Vec<vk::DescriptorSetLayout> {
-    if shader.descriptor_set_layout_bindings.is_empty() {
-        return Vec::new();
-    }
-
-    // Group bindings by set index
+pub fn make_descriptor_set_layouts(device_context: &DeviceContext, shaders: &[&varre_assets::Shader]) -> Vec<vk::DescriptorSetLayout> {
+    // Group bindings by set index across all shaders
     use std::collections::BTreeMap;
     let mut sets: BTreeMap<u32, Vec<vk::DescriptorSetLayoutBinding>> = BTreeMap::new();
 
-    for binding in shader.descriptor_set_layout_bindings {
-        sets.entry(binding.set)
-            .or_insert_with(Vec::new)
-            .push(convert_binding(binding));
+    for shader in shaders {
+        for binding in shader.descriptor_set_layout_bindings {
+            sets.entry(binding.set)
+                .or_insert_with(Vec::new)
+                .push(convert_binding(binding));
+        }
+    }
+
+    if sets.is_empty() {
+        return Vec::new();
     }
 
     // Create a descriptor set layout for each set, in order
@@ -128,6 +109,7 @@ pub fn make_descriptor_set_layouts(device_context: &DeviceContext, shader: &varr
 pub fn create_shader_object(
     device_context: &DeviceContext,
     shader: &varre_assets::Shader,
+    descriptor_set_layouts: &Vec<vk::DescriptorSetLayout>
 ) -> vk::ShaderEXT {
     let shader_object_loader = device_context.shader_object_loader.as_ref()
         .expect("shader_object_loader not available");
@@ -139,9 +121,6 @@ pub fn create_shader_object(
     let entry_point = CStr::from_bytes_with_nul(entry_point_string.as_bytes())
         .expect("Invalid entry point");
 
-    let descriptor_set_layouts = make_descriptor_set_layouts(device_context, shader);
-    let layouts_slice = descriptor_set_layouts.as_slice();
-
     unsafe {
         let shader_create_info = vk::ShaderCreateInfoEXT::default()
             .stage(stage)
@@ -149,7 +128,7 @@ pub fn create_shader_object(
             .code(shader.spv)
             .name(entry_point)
             .next_stage(next_stage)
-            .set_layouts(layouts_slice);
+            .set_layouts(descriptor_set_layouts.as_slice());
 
         shader_object_loader
             .create_shaders(&[shader_create_info], None)

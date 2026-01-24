@@ -5,7 +5,7 @@ use crate::mesh_utils::VulkanMesh;
 
 pub fn record_image_layout_transition(device: &Device, cmd : vk::CommandBuffer, img : vk::Image, old_layout : vk::ImageLayout, new_layout : vk::ImageLayout,
                                   src_access_mask : vk::AccessFlags2, dst_access_mask : vk::AccessFlags2,
-                                  src_stage_mask : vk::PipelineStageFlags2, dst_stage_mask : vk::PipelineStageFlags2) {
+                                  src_stage_mask : vk::PipelineStageFlags2, dst_stage_mask : vk::PipelineStageFlags2, subresource_range : vk::ImageSubresourceRange) {
    unsafe {
        let img_barrier = [vk::ImageMemoryBarrier2::default()
            .src_access_mask(src_access_mask)
@@ -17,12 +17,7 @@ pub fn record_image_layout_transition(device: &Device, cmd : vk::CommandBuffer, 
            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
            .image(img)
-           .subresource_range(vk::ImageSubresourceRange::default()
-               .aspect_mask(vk::ImageAspectFlags::COLOR)
-               .base_mip_level(0)
-               .level_count(1)
-               .base_array_layer(0)
-               .layer_count(1))];
+           .subresource_range(subresource_range)];
 
        let dependency_info = vk::DependencyInfo::default().image_memory_barriers(&img_barrier);
 
@@ -38,9 +33,6 @@ pub(crate) fn record_mesh_draw_setup(device_context: &DeviceContext, cmd: &vk::C
 
 pub(crate) fn record_draw(device_context: &DeviceContext, cmd : vk::CommandBuffer, img : vk::Image, img_view : vk::ImageView, area : vk::Rect2D, triangle_vert: vk::ShaderEXT, triangle_frag: vk::ShaderEXT) {
     unsafe {
-
-        // Transition color target to write
-        record_image_layout_transition(&device_context.device, cmd, img, vk::ImageLayout::UNDEFINED, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::AccessFlags2::NONE, vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT);
 
         // Begin rendering
         {
@@ -106,6 +98,5 @@ pub(crate) fn record_draw(device_context: &DeviceContext, cmd : vk::CommandBuffe
 
         device_context.device.cmd_end_rendering(cmd);
         // Transition color target to don't care
-        record_image_layout_transition(&device_context.device, cmd, img, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR, vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::AccessFlags2::NONE, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT, vk::PipelineStageFlags2::BOTTOM_OF_PIPE);
     }
 }

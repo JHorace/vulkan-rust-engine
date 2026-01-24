@@ -16,8 +16,12 @@ fn find_memory_type_index(
        .map(|(index, _memory_type)| index as _)
 }
 
-pub fn record_copy_buffer(device_context: &DeviceContext, cmd: &vk::CommandBuffer, src_buffer: &vk::Buffer, dst_buffer: &vk::Buffer, size: vk::DeviceSize) {
-    
+pub fn record_copy_buffer(device_context: &DeviceContext, cmd: vk::CommandBuffer, src_buffer: vk::Buffer, dst_buffer: vk::Buffer, size: vk::DeviceSize) {
+   unsafe {
+       let copy_region = vk::BufferCopy::default().size(size);
+
+       device_context.device.cmd_copy_buffer(cmd, src_buffer, dst_buffer, &[copy_region]);
+   }
 }
 
 pub fn create_buffer(device_context: &DeviceContext, size: vk::DeviceSize, usage: vk::BufferUsageFlags, memory_properties: vk::MemoryPropertyFlags) -> (vk::Buffer, vk::DeviceMemory) {

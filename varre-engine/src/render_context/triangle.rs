@@ -4,7 +4,7 @@ use varre_assets::ShaderID;
 use crate::command_buffers::record_image_layout_transition;
 use crate::DeviceContext;
 use crate::render_context::RenderContext;
-use crate::shader_utils::create_shader_object;
+use crate::shader_utils::{create_shader_object, make_descriptor_set_layouts};
 
 pub struct TriangleRenderContext {
     triangle_vert: vk::ShaderEXT,
@@ -15,10 +15,13 @@ impl TriangleRenderContext {
     pub fn new(device_context: &DeviceContext) -> Self {
       
         let vert_shader = ShaderID::SHADER_TRIANGLE_VERTEX.shader();
-        let triangle_vert = create_shader_object(device_context, vert_shader);
-        
         let frag_shader = ShaderID::SHADER_TRIANGLE_FRAGMENT.shader();
-        let triangle_frag = create_shader_object(device_context, frag_shader);
+
+        let descriptor_set_layouts = make_descriptor_set_layouts(device_context, &[vert_shader, frag_shader]);
+
+        let triangle_vert = create_shader_object(device_context, vert_shader, &descriptor_set_layouts);
+        
+        let triangle_frag = create_shader_object(device_context, frag_shader, &descriptor_set_layouts);
         
         Self{
            triangle_vert, triangle_frag
@@ -30,11 +33,8 @@ impl RenderContext for TriangleRenderContext {
     fn record_setup(&self, device_context: &DeviceContext, cmd: CommandBuffer) {
     }
 
-    fn record_draw(&self, device_context: &DeviceContext, cmd : vk::CommandBuffer, img: vk::Image, img_view: vk::ImageView, area: vk::Rect2D) {
+    fn record_draw(&self, device_context: &DeviceContext, cmd : vk::CommandBuffer, img: vk::Image, img_view: vk::ImageView, _: vk::Image, _: vk::ImageView, area: vk::Rect2D) {
         unsafe {
-
-            // Transition color target to write
-            record_image_layout_transition(&device_context.device, cmd, img, vk::ImageLayout::UNDEFINED, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::AccessFlags2::NONE, vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT);
 
             // Begin rendering
             {
@@ -99,8 +99,6 @@ impl RenderContext for TriangleRenderContext {
             device_context.device.cmd_draw(cmd, 3, 1, 0, 0);
 
             device_context.device.cmd_end_rendering(cmd);
-            // Transition color target to don't care
-            record_image_layout_transition(&device_context.device, cmd, img, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR, vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::AccessFlags2::NONE, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT, vk::PipelineStageFlags2::BOTTOM_OF_PIPE);
         }
     }
 }

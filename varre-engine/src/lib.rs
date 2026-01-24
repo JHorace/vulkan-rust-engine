@@ -182,6 +182,7 @@ pub struct DeviceContext {
     pub instance: Instance,
     pub physical_device: vk::PhysicalDevice,
     pub device: Device,
+    pub graphics_queue: vk::Queue,
     pub surface_loader: surface::Instance,
     pub swapchain_loader: swapchain::Device,
     pub shader_object_loader: Option<shader_object::Device>,
@@ -189,17 +190,13 @@ pub struct DeviceContext {
 
 pub struct VulkanEngine {
     device_context: DeviceContext,
-    queue: vk::Queue,
 
     command_pool: vk::CommandPool,
     draw_command_buffers: [vk::CommandBuffer; 3],
-    draw_command_buffer_fences: [vk::Fence; 3],
     one_time_command_buffer: vk::CommandBuffer,
 
     surface: Option<SurfaceKHR>,
     window: Option<vulkan_window::VulkanWindow>,
-    present_complete_semaphores: [vk::Semaphore; 3],
-    rendering_complete_semaphores: [vk::Semaphore; 3],
 
     frame_index: usize,
     debug_utils: Option<(debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
@@ -273,23 +270,25 @@ impl VulkanEngine {
         let swapchain_loader = swapchain::Device::new(&instance, &device);
         let shader_object_loader = Some(shader_object::Device::new(&instance, &device));
 
+        let graphics_queue = unsafe {
+            Device::get_device_queue(
+                &device,
+                queue_family_indices.graphics_general.unwrap(),
+                0,
+            )
+        };
+
         let device_context = DeviceContext {
             entry,
             instance,
             physical_device,
             device,
+            graphics_queue,
             surface_loader,
             swapchain_loader,
             shader_object_loader,
         };
 
-        let queue = unsafe {
-            Device::get_device_queue(
-                &device_context.device,
-                queue_family_indices.graphics_general.unwrap(),
-                0,
-            )
-        };
 
         let command_pool_create_info = vk::CommandPoolCreateInfo::default()
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
@@ -313,50 +312,17 @@ impl VulkanEngine {
                 .allocate_command_buffers(&command_buffer_allocate_info)?
         };
 
-        let fence_create_info =
-            vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-
-        let draw_command_buffer_fences = unsafe {
-            std::array::from_fn(|_| {
-                device_context
-                    .device
-                    .create_fence(&fence_create_info, None)
-                    .expect("failed to create fence")
-            })
-        };
-
         let one_time_command_buffer = command_buffers[0];
         let draw_command_buffers = command_buffers[1..][..3].try_into()?;
 
-        let present_complete_semaphores = unsafe {
-            std::array::from_fn(|_| {
-                device_context
-                    .device
-                    .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
-                    .expect("failed to create semaphore")
-            })
-        };
-
-        let rendering_complete_semaphores = unsafe {
-            std::array::from_fn(|_| {
-                device_context
-                    .device
-                    .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
-                    .expect("failed to create semaphore")
-            })
-        };
-
         Ok(VulkanEngine {
             device_context,
-            queue,
+
             command_pool,
             draw_command_buffers,
-            draw_command_buffer_fences,
             one_time_command_buffer,
             surface: None,
             window: None,
-            present_complete_semaphores,
-            rendering_complete_semaphores,
             frame_index: 0,
             debug_utils,
             render_context: None,
@@ -374,6 +340,8 @@ impl VulkanEngine {
                     Some(Box::new(MeshSimpleRenderContext::new(&self.device_context)));
             }
         }
+
+        self.setup_render_context();
     }
 
     pub fn add_window(
@@ -390,7 +358,42 @@ impl VulkanEngine {
                 width: window_width,
                 height: window_height,
             },
-        ))
+        ));
+
+        unsafe {
+            let cmd = self.one_time_command_buffer;
+            self.device_context
+                .device
+                .reset_command_buffer(
+                    cmd,
+                    vk::CommandBufferResetFlags::RELEASE_RESOURCES,
+                )
+                .expect("failed to reset command buffer");
+
+            let command_buffer_begin_info = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            self.device_context.device.begin_command_buffer(cmd, &command_buffer_begin_info).unwrap();
+            self.window.as_ref().unwrap().initialize_images(&self.device_context, self.one_time_command_buffer.clone());
+            self.device_context.device.end_command_buffer(cmd).unwrap();
+
+            let command_buffers = vec![cmd];
+
+            let submit_info = vk::SubmitInfo::default()
+                .command_buffers(&command_buffers);
+
+            self.device_context
+                .device
+                .queue_submit(self.device_context.graphics_queue, &[submit_info], vk::Fence::null())
+                .expect("failed to submit command buffer");
+
+            self.device_context.device.device_wait_idle().unwrap();
+        }
+    }
+
+    fn get_next_command_buffer(&mut self) -> vk::CommandBuffer {
+        let idx = self.frame_index.clone();
+        self.frame_index = (idx + 1) % NUM_FRAMES_IN_FLIGHT;
+        self.draw_command_buffers[idx].clone()
     }
 
     pub fn on_window_resized(&mut self, window_width: u32, window_height: u32) {
@@ -405,154 +408,39 @@ impl VulkanEngine {
         }
     }
 
-    pub fn record_and_submit_one_time_command_buffer<
-        F: FnOnce(&DeviceContext, vk::CommandBuffer),
-    >(
-        &self,
-        f: F,
-    ) {
-        unsafe {
-            self.record_command_buffer(self.one_time_command_buffer, f);
-
-            self.device_context
-                .device
-                .queue_wait_idle(self.queue)
-                .expect("failed to wait for queue idle");
-
-            self.submit_command_buffer(self.one_time_command_buffer);
-
-            self.device_context
-                .device
-                .queue_wait_idle(self.queue)
-                .expect("failed to wait for queue idle");
-        }
+    pub fn draw(&mut self) {
+        let cmd = self.get_next_command_buffer();
+        self.window.as_mut().unwrap().render_frame(&self.device_context, cmd, self.render_context.as_mut().unwrap())
     }
 
-    pub fn record_command_buffer<F: FnOnce(&DeviceContext, vk::CommandBuffer)>(
-        &self,
-        command_buffer: vk::CommandBuffer,
-        f: F,
-    ) {
+    pub fn setup_render_context(&mut self) {
         unsafe {
+            let cmd = self.one_time_command_buffer;
             self.device_context
                 .device
                 .reset_command_buffer(
-                    command_buffer,
+                    cmd,
                     vk::CommandBufferResetFlags::RELEASE_RESOURCES,
                 )
                 .expect("failed to reset command buffer");
 
             let command_buffer_begin_info = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            self.device_context.device.begin_command_buffer(cmd, &command_buffer_begin_info).unwrap();
+            self.render_context.as_mut().unwrap().record_setup(&self.device_context, self.one_time_command_buffer.clone());
+            self.device_context.device.end_command_buffer(cmd).unwrap();
 
-            self.device_context
-                .device
-                .begin_command_buffer(command_buffer, &command_buffer_begin_info)
-                .expect("failed to begin command buffer");
-
-            f(&self.device_context, command_buffer);
-
-            self.device_context
-                .device
-                .end_command_buffer(command_buffer)
-                .expect("failed to end command buffer");
-        }
-    }
-
-    pub fn submit_command_buffer(&self, command_buffer: vk::CommandBuffer) {
-        unsafe {
-            let command_buffers = vec![command_buffer];
-
-            let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
-
-            self.device_context
-                .device
-                .queue_submit(self.queue, &[submit_info], vk::Fence::null())
-                .expect("failed to submit command buffer");
-        }
-    }
-
-    pub fn draw(&mut self) {
-        unsafe {
-            let draw_command_buffer = self.draw_command_buffers[self.frame_index];
-            let draw_command_buffer_fence = self.draw_command_buffer_fences[self.frame_index];
-            let present_complete_semaphore = self.present_complete_semaphores[self.frame_index];
-
-            self.device_context
-                .device
-                .wait_for_fences(&[draw_command_buffer_fence], true, u64::MAX)
-                .unwrap();
-            self.device_context
-                .device
-                .reset_fences(&[draw_command_buffer_fence])
-                .unwrap();
-
-            let swapchain = self.window.as_ref().unwrap();
-
-            let (present_index, suboptimal) = self
-                .device_context
-                .swapchain_loader
-                .acquire_next_image(
-                    swapchain.vk_swapchain,
-                    u64::MAX,
-                    present_complete_semaphore,
-                    vk::Fence::null(),
-                )
-                .unwrap();
-
-            if suboptimal {
-                println!("suboptimal swapchain image acquired");
-            }
-
-            let render_context = self.render_context.as_ref().unwrap();
-
-            self.record_command_buffer(
-                draw_command_buffer,
-                |device_context, draw_command_buffer| {
-                    render_context.record_draw(
-                        device_context,
-                        draw_command_buffer,
-                        swapchain.swapchain_images[present_index as usize],
-                        swapchain.swapchain_image_views[present_index as usize],
-                        vk::Rect2D::default().extent(swapchain.extent),
-                    );
-                },
-            );
-
-            let rendering_complete_semaphore =
-                self.rendering_complete_semaphores[present_index as usize];
-
-            let command_buffers = vec![draw_command_buffer];
-            let wait_semaphores = vec![present_complete_semaphore];
-            let signal_semaphores = vec![rendering_complete_semaphore];
-            let wait_stage_mask = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+            let command_buffers = vec![cmd];
 
             let submit_info = vk::SubmitInfo::default()
-                .command_buffers(&command_buffers)
-                .wait_semaphores(&wait_semaphores)
-                .signal_semaphores(&signal_semaphores)
-                .wait_dst_stage_mask(&wait_stage_mask);
+                .command_buffers(&command_buffers);
 
             self.device_context
                 .device
-                .queue_submit(self.queue, &[submit_info], draw_command_buffer_fence)
+                .queue_submit(self.device_context.graphics_queue, &[submit_info], vk::Fence::null())
                 .expect("failed to submit command buffer");
 
-            let swapchains = vec![swapchain.vk_swapchain];
-            let image_indices = vec![present_index];
-            let wait_semaphores = vec![rendering_complete_semaphore];
-
-            let present_info = vk::PresentInfoKHR::default()
-                .wait_semaphores(&wait_semaphores)
-                .swapchains(&swapchains)
-                .image_indices(&image_indices);
-
-            self.device_context
-                .swapchain_loader
-                .queue_present(self.queue, &present_info)
-                .unwrap();
-
-            self.frame_index = (self.frame_index + 1) % 3;
+            self.device_context.device.device_wait_idle().unwrap();
         }
     }
 }
@@ -570,21 +458,6 @@ impl Drop for VulkanEngine {
                 self.device_context
                     .swapchain_loader
                     .destroy_swapchain(swapchain.vk_swapchain, None);
-            }
-
-            // Destroy synchronization primitives
-            for semaphore in self.present_complete_semaphores {
-                self.device_context
-                    .device
-                    .destroy_semaphore(semaphore, None);
-            }
-            for semaphore in self.rendering_complete_semaphores {
-                self.device_context
-                    .device
-                    .destroy_semaphore(semaphore, None);
-            }
-            for fence in self.draw_command_buffer_fences {
-                self.device_context.device.destroy_fence(fence, None);
             }
 
             // Destroy command pool (this also frees command buffers)
@@ -653,9 +526,4 @@ mod tests {
         VulkanEngine::new(true, None).expect("Failed to create VarreEngine");
     }
 
-    #[test]
-    fn test_submit_command_buffer() {
-        let engine = VulkanEngine::new(true, None).expect("Failed to create VarreEngine");
-        engine.record_and_submit_one_time_command_buffer(|_, _| {});
-    }
 }

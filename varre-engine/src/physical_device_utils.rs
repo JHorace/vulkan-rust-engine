@@ -1,3 +1,4 @@
+use crate::DeviceContext;
 use ash::vk;
 
 #[derive(Copy, Clone)]
@@ -17,7 +18,7 @@ impl QueueFamilyIndices {
                 |(index, info)| {
                     (info.queue_flags.contains(vk::QueueFlags::GRAPHICS)
                         && info.queue_flags.contains(vk::QueueFlags::COMPUTE))
-                        .then_some(index as u32)
+                    .then_some(index as u32)
                 },
             ),
             //Find the first dedicated compute queue family - that does not support graphics.
@@ -27,7 +28,7 @@ impl QueueFamilyIndices {
                 .find_map(|(index, info)| {
                     (info.queue_flags.contains(vk::QueueFlags::COMPUTE)
                         && !info.queue_flags.contains(vk::QueueFlags::GRAPHICS))
-                        .then_some(index as u32)
+                    .then_some(index as u32)
                 }),
             //Find the first dedicated transfer queue family - that does not support graphics or compute.
             transfer: queue_family_properties
@@ -37,14 +38,37 @@ impl QueueFamilyIndices {
                     (info.queue_flags.contains(vk::QueueFlags::TRANSFER)
                         && !info.queue_flags.contains(vk::QueueFlags::GRAPHICS)
                         && !info.queue_flags.contains(vk::QueueFlags::COMPUTE))
-                        .then_some(index as u32)
+                    .then_some(index as u32)
                 }),
         }
     }
 }
+pub fn find_memorytype_index(
+    device_context: &DeviceContext,
+    memory_req: &vk::MemoryRequirements,
+    flags: vk::MemoryPropertyFlags,
+) -> Option<u32> {
+    let memory_properties = unsafe {
+        device_context
+            .instance
+            .get_physical_device_memory_properties(device_context.physical_device)
+    };
 
-pub fn get_physical_devices_supporting_surface(physical_devices: Vec<vk::PhysicalDevice>, instance: &ash::Instance, surface: vk::SurfaceKHR, surface_loader: &ash::khr::surface::Instance) -> Vec<vk::PhysicalDevice>
-{
+    memory_properties.memory_types[..memory_properties.memory_type_count as _]
+        .iter()
+        .enumerate()
+        .find(|(index, memory_type)| {
+            (1 << index) & memory_req.memory_type_bits != 0
+                && memory_type.property_flags & flags == flags
+        })
+        .map(|(index, _memory_type)| index as _)
+}
+pub fn get_physical_devices_supporting_surface(
+    physical_devices: Vec<vk::PhysicalDevice>,
+    instance: &ash::Instance,
+    surface: vk::SurfaceKHR,
+    surface_loader: &ash::khr::surface::Instance,
+) -> Vec<vk::PhysicalDevice> {
     unsafe {
         physical_devices
             .into_iter()
@@ -67,7 +91,10 @@ pub fn get_physical_devices_supporting_surface(physical_devices: Vec<vk::Physica
     }
 }
 
-pub fn select_physical_device(physical_devices: Vec<vk::PhysicalDevice>, instance: &ash::Instance) -> vk::PhysicalDevice {
+pub fn select_physical_device(
+    physical_devices: Vec<vk::PhysicalDevice>,
+    instance: &ash::Instance,
+) -> vk::PhysicalDevice {
     unsafe {
         /*
         physical_devices

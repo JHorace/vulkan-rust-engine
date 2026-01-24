@@ -14,5 +14,5 @@ pub trait RenderContext {
         
     }
     fn record_setup(&self, device_context: &DeviceContext, cmd : vk::CommandBuffer);
-    fn record_draw(&self, device_context: &DeviceContext, cmd : vk::CommandBuffer, img: vk::Image, img_view: vk::ImageView, area: vk::Rect2D);
+    fn record_draw(&self, device_context: &DeviceContext, cmd : vk::CommandBuffer, img: vk::Image, img_view: vk::ImageView, depth_img: vk::Image, depth_view: vk::ImageView, area: vk::Rect2D);
 }
